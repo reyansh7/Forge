@@ -1,0 +1,27 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+credentials.json
+*.p12
+
+# Dependencies (future)
+node_modules/
+vendor/
+
+# Obsidian vault metadata (personal; this folder is also a vault)
+.obsidian/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / local
+*.swp
+*.swo
+*~

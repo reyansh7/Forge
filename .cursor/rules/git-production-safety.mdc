@@ -1,0 +1,16 @@
+---
+description: Git, secrets, and production safety. Always apply.
+alwaysApply: true
+---
+
+# Git and production safety
+
+This directory may not be a git repository yet. Do not run `git init` unless the developer explicitly authorizes it. Do not add remotes or rewrite history.
+
+Prefer small, understandable commits when committing is requested. Never `git push --force`, `git reset --hard`, or `git clean -fd` without explicit authorization.
+
+Never assume development access implies production access. Do not destroy infrastructure, drop databases, or change production security boundaries unless the developer names the exact operation.
+
+Never commit secrets, `.env` files, keys, or tokens. Never print credentials. Never hardcode credentials. If a hook or scan flags a secret, redact and stop rather than working around it.
+
+Do not execute user-controlled input on the host. User code is untrusted code.

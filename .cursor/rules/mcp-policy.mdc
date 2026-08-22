@@ -1,0 +1,21 @@
+---
+description: Which MCP tools the Forge agent may use. Always apply.
+alwaysApply: true
+---
+
+# MCP and plugin policy
+
+Do not install, enable, disable, or uninstall user-level Cursor plugins or MCP servers. Do not edit `~/.cursor/mcp.json`.
+
+Project `.cursor/mcp.json` has no servers on purpose. Do not add MCP servers unless the developer explicitly asks.
+
+**In policy** (use only if already present at user scope):
+
+- Context7 — current library/framework docs
+- Playwright — later isolated Forge UI checks; never `browser_run_code_unsafe`
+
+**Out of policy** unless the developer names the tool in this conversation:
+
+- GitLab, Sentry, Neon, Azure, AWS, Render, Vercel, Figma, Canva, Hugging Face, Apify, Roboflow, Context.dev, Obsidian, Cloudflare
+
+Do not authenticate Sentry, Neon, GitHub MCP, Cloudflare, or any cloud account. Do not copy tokens from user MCP config into this repo.

@@ -1,0 +1,21 @@
+---
+description: Forge source of truth and phase gates. Always apply.
+alwaysApply: true
+---
+
+# Source of truth
+
+Authoritative documents:
+
+- `AGENTS.md` — how the agent behaves
+- `docs/ARCHITECTURE.md` — what Forge is
+- `docs/ROADMAP.md` — which phase is current
+- `docs/DEVELOPMENT_RULES.md` — how we write and ship code
+
+If chat conflicts with these files, follow chat for this conversation only, then flag the conflict.
+
+If `ARCHITECTURE.md`, `ROADMAP.md`, or `DEVELOPMENT_RULES.md` are empty or missing, do not invent their contents. Report the gap and wait.
+
+Do not start Phase 0 or any other phase until the developer says `START PHASE N`. Cursor environment work is not that authorization.
+
+Do not implement future-phase features, even if they look small. Design so evolution stays possible; do not build the future now.

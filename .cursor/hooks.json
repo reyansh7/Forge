@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "node .cursor/hooks/protect-shell.js",
+        "failClosed": false
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "node .cursor/hooks/scan-secrets.js",
+        "failClosed": false
+      }
+    ]
+  }
+}
