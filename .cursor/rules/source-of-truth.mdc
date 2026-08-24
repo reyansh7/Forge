@@ -19,3 +19,5 @@ If `ARCHITECTURE.md`, `ROADMAP.md`, or `DEVELOPMENT_RULES.md` are empty or missi
 Do not start Phase 0 or any other phase until the developer says `START PHASE N`. Cursor environment work is not that authorization.
 
 Do not implement future-phase features, even if they look small. Design so evolution stays possible; do not build the future now.
+
+Comments: Forge is a learning project. Follow `AGENTS.md` section 7 — thorough teaching comments on packages, exported APIs, concurrency, and infrastructure boundaries. Do not ship uncommented control-plane code.

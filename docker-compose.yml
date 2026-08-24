@@ -1,0 +1,49 @@
+# Control-plane data stores for local development.
+#
+# Docker Compose starts named *containers* from *images*. An image is a
+# snapshot (postgres:16-alpine). A container is a running instance.
+# Volumes persist Postgres files so `docker compose down` does not wipe data
+# unless you also pass -v.
+#
+# Ports are published on 127.0.0.1 only so another machine on the LAN cannot
+# reach these stores. This is not a production topology.
+#
+# User application containers are not defined here. Untrusted workloads
+# must not share this compose file's privileges or network without an
+# explicit later design.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      # Compose interpolates ${VAR:-default} from the shell and from `.env`.
+      POSTGRES_USER: ${FORGE_POSTGRES_USER:-forge}
+      POSTGRES_PASSWORD: ${FORGE_POSTGRES_PASSWORD:-forge}
+      POSTGRES_DB: ${FORGE_POSTGRES_DB:-forge}
+    # Host 5432 is often already taken on Windows (local Postgres).
+    # Inside the container Postgres still listens on 5432; only the host
+    # mapping uses FORGE_POSTGRES_HOST_PORT (default 15432).
+    ports:
+      - "127.0.0.1:${FORGE_POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - forge_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready is the official "can I connect" probe. Compose waits on
+      # this before considering the service healthy.
+      test: ["CMD-SHELL", "pg_isready -U ${FORGE_POSTGRES_USER:-forge} -d ${FORGE_POSTGRES_DB:-forge}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  forge_postgres_data:

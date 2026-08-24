@@ -11,7 +11,7 @@ It is **not** architecture, roadmap, or development-rules source of truth. Those
 
 If those three `docs/` files are empty, do not invent their contents.
 
-No Forge implementation phase has started. This environment is not `START PHASE 0`.
+Implementation phases are gated by `START PHASE N` in chat and by `docs/ROADMAP.md`. This file only describes Cursor tooling.
 
 ## Layout
 
@@ -28,6 +28,8 @@ docs/CURSOR_ENVIRONMENT.md   (this file)
 ```
 
 Load detail only when relevant: `AGENTS.md` → rules → skill → references → files.
+
+Code comments for Forge source live in `AGENTS.md` section 7 and `docs/DEVELOPMENT_RULES.md` (Code Quality). Teaching comments on Go idioms and infrastructure are required; this file does not override that.
 
 ## Git
 

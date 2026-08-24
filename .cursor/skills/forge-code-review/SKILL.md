@@ -22,6 +22,7 @@ Review as an independent reader. Do not implement fixes unless asked.
 - Dependencies: every new one justified
 - Secrets and untrusted input: none committed; none executed on the host
 - Docs: architecture/roadmap updated only when behavior actually changed
+- Comments: new infrastructure and Go idioms are taught in-file (see AGENTS.md §7)
 
 ## Output
 

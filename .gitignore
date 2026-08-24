@@ -13,6 +13,12 @@ credentials.json
 node_modules/
 vendor/
 
+# Go build output
+/bin/
+*.exe
+*.test
+*.out
+
 # Obsidian vault metadata (personal; this folder is also a vault)
 .obsidian/
 
