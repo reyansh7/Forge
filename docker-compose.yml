@@ -8,9 +8,9 @@
 # Ports are published on 127.0.0.1 only so another machine on the LAN cannot
 # reach these stores. This is not a production topology.
 #
-# User application containers are not defined here. Untrusted workloads
-# must not share this compose file's privileges or network without an
-# explicit later design.
+# The Go API (`go run ./cmd/api`) and worker (`go run ./cmd/worker`)
+# run on the host and connect to these loopback ports. They are not
+# Compose services in Phase 0 — same pattern as increment 0.1.
 
 services:
   postgres:

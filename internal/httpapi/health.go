@@ -1,6 +1,6 @@
 // Package httpapi is the control-plane HTTP surface.
 //
-// Routes here are Forge's own API (health, projects). Deployment routes come later.
+// Routes here are Forge's own API (health, projects, jobs).
 // They are not the HTTP servers of apps users deploy — those will sit
 // behind a reverse proxy in a later phase.
 package httpapi
@@ -26,13 +26,16 @@ type StatusChecker interface {
 //
 // cmd/api fills these fields. Postgres and Redis satisfy StatusChecker
 // (/health). The same *store.Postgres also satisfies ProjectStore
-// (/projects). Tests swap fakes so Docker is not required.
+// (/projects). Jobs is the queue abstraction (not Redis commands).
+// Tests swap fakes so Docker is not required.
 type Server struct {
 	Log      *slog.Logger
 	Postgres StatusChecker
 	Redis    StatusChecker
 	// Projects is unused by /health. Project routes require it.
 	Projects ProjectStore
+	// Jobs is unused by /health. POST /jobs requires it.
+	Jobs JobQueue
 }
 
 func (s *Server) logger() *slog.Logger {
@@ -55,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /projects", s.createProject)
 	mux.HandleFunc("GET /projects", s.listProjects)
 	mux.HandleFunc("GET /projects/{id}", s.getProject)
+	mux.HandleFunc("POST /jobs", s.enqueueJob)
 	return mux
 }
 

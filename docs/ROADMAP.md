@@ -315,11 +315,13 @@ Before moving forward:
 
 **Phase 0 — IN PROGRESS** (authorized `START PHASE 0`)
 
-**Current increment: 0.2 — PostgreSQL persistence (Project)**
+**Current increment: 0.3 — Redis job queue + worker foundation**
 
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
-Increment 0.2 (this work): `projects` table, migrations, and `POST/GET /projects`. This increment does **not** detect, build, deploy, execute user code, serve a dashboard, run a worker, use Redis as a queue, or configure Caddy.
+Increment 0.2 (done): `projects` table, migrations, and `POST/GET /projects`.
+
+Increment 0.3 (this work): Redis LIST as a transient job queue, `POST /jobs`, and `cmd/worker` consuming an allowlisted `example` job. This increment does **not** clone git, build images, deploy user code, run Caddy, or persist jobs in PostgreSQL.
 
 Later Phase 0 increments will add the rest of the local deployment loop.
 

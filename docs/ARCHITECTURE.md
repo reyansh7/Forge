@@ -186,6 +186,8 @@ Initial responsibilities may include:
 
 Redis should not replace PostgreSQL as the durable source of truth.
 
+**Current use (Phase 0 increment 0.3):** a Redis LIST (`forge:jobs`) is transient job transport. The API `RPUSH`es JSON jobs; `cmd/worker` `BLPOP`s them. Jobs are **not** stored in PostgreSQL. A Redis restart can drop queued jobs. That is accepted at this increment; the LIST is not a durable workflow engine.
+
 ### 4.5 Worker
 
 Workers execute asynchronous Forge operations.
@@ -211,6 +213,8 @@ Report Result
 ```
 
 The worker must not execute untrusted application code directly on the control-plane host.
+
+**Current use (Phase 0 increment 0.3):** `cmd/worker` is a separate process from `cmd/api`. It consumes only the internal job type `example` (log id/type and return). HTTP handlers do not run jobs inline. Unknown types and client `command` fields are rejected. Git clone, Docker build, and user-code execution are not implemented.
 
 ### 4.6 Build System
 

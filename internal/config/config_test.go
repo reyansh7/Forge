@@ -35,6 +35,21 @@ func TestLoadDefaultsAddrToLoopback(t *testing.T) {
 	}
 }
 
+func TestLoadWorkerRequiresRedisOnly(t *testing.T) {
+	// Worker must start without Postgres: jobs are not SQL rows.
+	t.Setenv("FORGE_DATABASE_URL", "")
+	os.Unsetenv("FORGE_DATABASE_URL")
+	t.Setenv("FORGE_REDIS_URL", "redis://127.0.0.1:6379/0")
+
+	cfg, err := LoadWorker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RedisURL != "redis://127.0.0.1:6379/0" {
+		t.Fatalf("RedisURL = %q", cfg.RedisURL)
+	}
+}
+
 func TestLoadHonorsAddrOverride(t *testing.T) {
 	t.Setenv("FORGE_API_ADDR", "127.0.0.1:9090")
 	t.Setenv("FORGE_DATABASE_URL", "postgres://example")

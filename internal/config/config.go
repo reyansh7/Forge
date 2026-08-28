@@ -22,8 +22,8 @@ type Config struct {
 	// persist deployments.
 	DatabaseURL string
 
-	// RedisURL is a redis:// URL. Required for increment 0.1 liveness;
-	// later phases will use Redis as a queue/cache.
+	// RedisURL is a redis:// URL. Required for /health and for the
+	// increment 0.3 job LIST. Redis is not the durable project store.
 	RedisURL string
 }
 
@@ -56,6 +56,23 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
 
+	return cfg, nil
+}
+
+// LoadWorker reads operator env for cmd/worker.
+//
+// Only FORGE_REDIS_URL is required: the worker does not open Postgres.
+// Jobs are not duplicated into SQL; Redis LIST is transient transport.
+func LoadWorker() (Config, error) {
+	if err := loadDotEnv(".env"); err != nil {
+		return Config{}, err
+	}
+	cfg := Config{
+		RedisURL: os.Getenv("FORGE_REDIS_URL"),
+	}
+	if strings.TrimSpace(cfg.RedisURL) == "" {
+		return Config{}, fmt.Errorf("missing required environment variable: FORGE_REDIS_URL")
+	}
 	return cfg, nil
 }
 

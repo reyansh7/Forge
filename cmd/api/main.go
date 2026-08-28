@@ -2,8 +2,8 @@
 //
 // A "control plane" is the software that *manages* deployments. This
 // binary is that process: it loads config, checks that Postgres and Redis
-// are reachable, then serves HTTP. It must never clone user git repos or
-// exec user build commands on the host — that is untrusted code.
+// are reachable, serves HTTP, and enqueues jobs. It must never clone user
+// git repos or exec user build commands on the host — that is untrusted code.
 package main
 
 import (
@@ -18,6 +18,7 @@ import (
 
 	"github.com/reyansh7/Forge/internal/config"
 	"github.com/reyansh7/Forge/internal/httpapi"
+	"github.com/reyansh7/Forge/internal/queue"
 	"github.com/reyansh7/Forge/internal/store"
 )
 
@@ -69,13 +70,19 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	// One Postgres value fills two ports: Ping for /health, ProjectStore
-	// for /projects. Redis is still liveness-only in 0.2 (no queue).
+	// Redis LIST queue for POST /jobs. Health still uses RedisPinger (PING).
+	// The handler never issues RPUSH itself — only JobQueue.Enqueue.
+	jobs, err := queue.NewRedis(cfg.RedisURL, queue.DefaultKey)
+	if err != nil {
+		return err
+	}
+
 	api := &httpapi.Server{
 		Log:      log,
 		Postgres: pg,
 		Redis:    rdb,
 		Projects: pg,
+		Jobs:     jobs,
 	}
 
 	srv := &http.Server{
