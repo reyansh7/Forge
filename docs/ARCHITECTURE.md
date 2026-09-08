@@ -15,11 +15,26 @@ The goal is to provide a system where a user can connect a Git repository, and F
 7. Expose it through a reverse proxy.
 8. Provide deployment and runtime information through a dashboard.
 
-Forge is intended to provide a practical understanding of the infrastructure behind platforms such as Railway, Render, and similar PaaS products.
+Long-term product direction (developer experience, production capability, self-host vs managed, AWS readiness) is in `docs/PRODUCT_VISION.md`. That file does **not** authorize implementation. This file is the technical architecture and constraints. Sequencing is `docs/ROADMAP.md`.
 
-Forge is not initially intended to compete with these platforms in scale. The initial objective is to build a correct, understandable, self-hostable system and progressively evolve it toward a production-capable architecture.
+Forge is intended to provide a practical understanding of the infrastructure behind platforms such as Railway, Render, and similar PaaS products — and to evolve, phase by phase, into a production-capable system. It is **not** specified by copying those products.
+
+The initial objective remains: a correct, understandable, self-hostable **local** system. Scale, public DNS, and multi-region are later phases.
 
 When Forge is later hosted off the local machine, the first cloud target is **AWS within the Free Tier**. That is a design constraint from this point forward, not permission to implement AWS now. See section 11.
+
+### 1.1 Source-of-truth hierarchy
+
+```text
+PRODUCT_VISION.md      long-term direction; does not authorize implementation
+ROADMAP.md             phased implementation; START PHASE N authorizes work
+ARCHITECTURE.md        technical architecture and constraints (this file)
+DEVELOPMENT_RULES.md   engineering and security rules
+CURSOR_ENVIRONMENT.md  Cursor tooling only
+AGENTS.md              agent operating contract
+```
+
+If these documents conflict, stop and name the conflict. Do not silently pick a side.
 
 ---
 
@@ -116,9 +131,9 @@ This diagram represents the initial architecture and logical responsibilities. E
 
 The Go API is the primary control-plane service.
 
-Responsibilities include:
+Responsibilities include (some are **not yet implemented** — see Current use):
 
-- authentication and authorization
+- authentication and authorization (Phase 3+; today the gate is loopback)
 - project management
 - application management
 - deployment requests
@@ -138,9 +153,9 @@ Long-running or potentially dangerous operations should be delegated to appropri
 
 The Next.js application provides the developer-facing interface.
 
-Initial responsibilities include:
+Initial responsibilities include (auth UI is **not** current):
 
-- authentication UI
+- authentication UI (Phase 3+)
 - projects
 - applications
 - deployments
@@ -151,7 +166,7 @@ Initial responsibilities include:
 
 The dashboard communicates with the Go API rather than directly controlling infrastructure.
 
-**Current use (Phase 2):** `web/` is a Next.js App Router UI on `127.0.0.1:3000` with a black/red theme. It lists projects and applications, manages env vars (including bulk replace), application settings (`root_directory`, `health_path`, `local_host`), queues deployments and rollbacks, polls status, shows `docker logs -t` snapshots and persisted `build_log`, and can stop a live app. Browser calls go to `/forge-api/*`, which Next.js rewrites to the Go API. The dashboard does not talk to Docker, Redis, or Caddy. There is no authentication UI (loopback-only). Log streaming remains Phase 4.
+**Current use (Phase 2):** `web/` is a Next.js App Router UI on `127.0.0.1:3000` with a black/red theme. It lists projects and applications, manages env vars (including bulk replace), application settings (`root_directory`, `health_path`, `local_host`), queues deployments and rollbacks, polls status, shows `docker logs -t` snapshots and persisted `build_log`, and can stop a live app. Browser calls go to `/forge-api/*`, which Next.js rewrites to the Go API. The dashboard does not talk to Docker, Redis, or Caddy. There is no authentication UI (loopback-only). Log streaming remains a Phase 4 roadmap item.
 
 ### 4.3 PostgreSQL
 
@@ -175,7 +190,7 @@ Redis must not become the source of truth for durable state.
 
 The exact schema must be designed incrementally during the appropriate implementation phase.
 
-**Current schema (Phase 2):** `schema_migrations`; `projects`; `applications` (`id`, `project_id`, `name`, `repository_url`, `root_directory`, `health_path`, `local_host`, timestamps, unique `(project_id, name)`, unique non-empty `local_host`); `application_env_vars`; `deployments` (`id`, `project_id`, `application_id`, `status`, `failed_stage`, `error_message`, `runtime_kind`, `host_port`, `container_id`, `public_url`, `image_name`, `build_log`, `rollback_of`, timestamps). A project is a folder. An application is the deployable unit. Creating a project also inserts a default application named `app` with the same repository URL. Status values include `stopped`. Two apps in one project may both be LIVE; **one application has at most one LIVE deployment** (unique index). The API refuses Deploy or Rollback while that container is still running. `root_directory` is a relative path inside the clone (default `.`); the worker confines it so `..` cannot escape the fetch tree. `health_path` is an HTTP path on loopback (default `/`). `local_host` is an optional `.localhost` slug routed by Caddy in addition to `/d/{id}/` — not public DNS and not TLS. `image_name` / `build_log` are worker-written artifacts for history and rollback. Env values are operator metadata in Postgres, not a secret manager (Phase 6). Storing a URL does not execute it; the worker fetches only after a deploy job. Rollback copies `image_name` from a prior row and skips fetch/build.
+**Current schema (Phase 2):** `schema_migrations`; `projects`; `applications` (`id`, `project_id`, `name`, `repository_url`, `root_directory`, `health_path`, `local_host`, timestamps, unique `(project_id, name)`, unique non-empty `local_host`); `application_env_vars`; `deployments` (`id`, `project_id`, `application_id`, `status`, `failed_stage`, `error_message`, `runtime_kind`, `host_port`, `container_id`, `public_url`, `image_name`, `build_log`, `rollback_of`, timestamps). A project is a folder. An application is the deployable unit. Creating a project also inserts a default application named `app` with the same repository URL. Status values include `stopped`. Two apps in one project may both be LIVE; **one application has at most one LIVE deployment** (unique index). The API refuses Deploy or Rollback while that container is still running. `root_directory` is a relative path inside the clone (default `.`); the worker confines it so `..` cannot escape the fetch tree. `health_path` is an HTTP path on loopback (default `/`). `local_host` is an optional `.localhost` slug routed by Caddy in addition to `/d/{id}/` — not public DNS and not TLS. `image_name` / `build_log` are worker-written artifacts for history and rollback. Env values are operator metadata in Postgres, not a secret manager (dedicated secret management is a Phase 5 roadmap item). Storing a URL does not execute it; the worker fetches only after a deploy job. Rollback copies `image_name` from a prior row and skips fetch/build.
 
 ### 4.4 Redis
 
@@ -263,7 +278,7 @@ A deployed application should conceptually have:
 
 The runtime must not share unrestricted control-plane privileges.
 
-**Current use (Phase 2):** `docker run` publishes `127.0.0.1:{port}:8080` with memory/CPU/pids limits and `no-new-privileges`. Operator env vars are passed as `-e KEY=VALUE` after key/value validation; `PORT=8080` is applied last so Forge owns the listen port. `PORT` and `FORGE_*` keys are rejected. No Docker socket mount, no `--privileged`. The worker HTTP-probes `GET http://127.0.0.1:{port}{health_path}` once at go-live. After LIVE, dashboard `/applications/{id}/health` uses `docker inspect` (container running) so polling does not flood the app's access logs. Runtime logs are a `docker logs -t --tail` snapshot (not a websocket stream; that is Phase 4). Build output is on the deployment row.
+**Current use (Phase 2):** `docker run` publishes `127.0.0.1:{port}:8080` with memory/CPU/pids limits and `no-new-privileges`. Operator env vars are passed as `-e KEY=VALUE` after key/value validation; `PORT=8080` is applied last so Forge owns the listen port. `PORT` and `FORGE_*` keys are rejected. No Docker socket mount, no `--privileged`. The worker HTTP-probes `GET http://127.0.0.1:{port}{health_path}` once at go-live. After LIVE, dashboard `/applications/{id}/health` uses `docker inspect` (container running) so polling does not flood the app's access logs. Runtime logs are a `docker logs -t --tail` snapshot (not a websocket stream; that is a Phase 4 roadmap item). Build output is on the deployment row. Disk quotas, tenant network policies, and autoscaling are not current.
 
 ### 4.8 Reverse Proxy
 
@@ -369,16 +384,9 @@ Important principles:
 
 **No host execution** — user-provided commands must never simply be passed to a host shell.
 
-**Resource limits** — user workloads must eventually have limits for resources such as:
+**Resource limits** — user workloads must have limits. **Current:** memory, CPU, and pids on `docker run`, plus loopback publish. **Future (roadmap):** disk, deploy concurrency, retention, and tenant quotas (Phase 5+).
 
-- CPU
-- memory
-- processes
-- disk
-- execution time
-- networking
-
-**Network isolation** — user workloads must not automatically receive unrestricted access to internal infrastructure.
+**Network isolation** — user workloads must not automatically receive unrestricted access to internal infrastructure. **Current:** published ports are loopback; Caddy admin is loopback. **Future:** explicit tenant network policy (Phase 3+).
 
 **Secrets** — secrets must never be:
 
@@ -387,9 +395,13 @@ Important principles:
 - exposed to unrelated workloads
 - unnecessarily available to build processes
 
-**Authentication and authorization** — every control-plane operation that affects resources must be authorized.
+Postgres env vars are **not** a secret manager.
 
-**Auditability** — security-sensitive operations should eventually produce useful audit information.
+**Authentication and authorization** — every control-plane operation that affects resources must be authorized. **Current:** loopback bind is the only gate. **Future:** identity and authorization (Phase 3).
+
+**Auditability** — security-sensitive operations should produce useful audit information (Phase 3+).
+
+**Tenant isolation** — when more than one operator or tenant exists, compromise of one workload must not imply compromise of another tenant or of the control plane. **Current:** single-operator local machine; one LIVE container per application. Multi-tenant isolation is not implemented.
 
 ---
 
@@ -412,6 +424,8 @@ The initial networking model is conceptually:
 Applications should not need to expose their internal ports directly to the public Internet.
 
 The reverse proxy is the public entry point.
+
+**Current:** Caddy is published on `127.0.0.1:9080` only. “Internet” in this diagram is not the present bind.
 
 Internal service communication should be explicit and controlled.
 
@@ -504,24 +518,24 @@ A local Compose stack (Postgres, Redis, Caddy, API, worker) is the current Phase
 The architecture must stay modular so Forge can grow **beyond** the Free Tier without a major rewrite:
 
 ```text
-Phase 0 (now)     Local Compose, loopback, one machine
+Current            Local Compose, loopback, one machine (Phases 0–2)
         ↓
-First cloud       Same component boundaries, cheapest AWS that fits Free Tier
+First cloud        Same component boundaries, cheapest AWS that fits Free Tier (Phase 8)
         ↓
-Later             More capacity, HA, extra regions — swap or add modules, do not rebuild Forge
+Later              More capacity, HA, extra regions — swap or add modules, do not rebuild Forge
 ```
 
 Interfaces already used locally (HTTP API, `JobQueue`, store, worker, proxy) are the seam. A future AWS queue or database adapter may replace a local implementation; handlers and the deployment state machine must not assume localhost, Docker Desktop, or a NAT Gateway.
 
-Do not implement those adapters until the roadmap increment that authorizes cloud hosting.
+Do not implement those adapters until the roadmap increment that authorizes cloud hosting (Phase 8).
 
 ### 11.4 What this does not change
 
-- Phase 0 remains local. Docker Compose on loopback is correct.
+- Phase 0–2 remain local. Docker Compose on loopback is correct until a later phase explicitly changes publication.
 - User code remains untrusted. Serverless or managed runtimes do not relax isolation.
 - PostgreSQL remains durable source of truth; Redis remains transient.
 - The dashboard still talks only to the API.
-- Distributed or production AWS topology is still a later phase (see `docs/ROADMAP.md`).
+- Distributed or production AWS topology is still a later phase (Phase 8+ in `docs/ROADMAP.md`).
 
 ### 11.5 Decision test for future work
 
@@ -536,7 +550,39 @@ If the answer is unclear, prefer the smaller local or managed option and documen
 
 ---
 
-## 12. Architectural Constraints
+## 12. Evolution interfaces
+
+Future phases must extend these **roles**, not collapse them into a vendor SDK.
+
+| Role | Current local shape | Must remain replaceable |
+|------|---------------------|-------------------------|
+| Control plane API | `cmd/api`, `internal/httpapi` | HTTP contract; no Docker in handlers |
+| Durable storage | PostgreSQL via store interfaces | Not Redis; not a cloud-only API baked into handlers |
+| Transient queue | Redis LIST `JobQueue` | Memory implementation exists for tests; cloud queue is an adapter |
+| Worker | `cmd/worker` + `internal/deploy` | Same job types; no user code on host |
+| Runtime | Docker CLI from worker | Isolation boundary stays even if the engine changes |
+| Reverse proxy | Caddy admin `/load` | Orchestration stays in the control plane |
+| Scheduler / node | **Not implemented** (single process worker) | Add as a component; do not embed placement inside HTTP handlers |
+
+**Control plane vs workload plane** stays the primary security cut (section 6).
+
+**Secure build isolation** — `docker build` is untrusted. Future builders must not `exec` repo scripts on the host.
+
+**Runtime isolation** — containers with least privilege; no Docker socket in the workload.
+
+**Reliable deployment state machine** — named statuses, persisted failures, image rollback as a first-class transition. Advanced strategies add states; they do not delete the machine.
+
+**Rollback / recovery** — current: reuse `image_name`. Future: backups (Phase 5), node failover (Phase 6+), multi-region DR (Phase 10).
+
+**Observability** — snapshots now; streaming/metrics/tracing later. Telemetry must not become a secret leak.
+
+**High availability and disaster recovery** — design so Postgres remains source of truth and queue loss is survivable (jobs may drop today; that is documented). HA is not current.
+
+Do not design every future subsystem at implementation detail in this file. Prefer a named interface and a later increment.
+
+---
+
+## 13. Architectural Constraints
 
 The following constraints apply:
 
@@ -549,13 +595,13 @@ The following constraints apply:
 - Prefer explicit boundaries over implicit behavior.
 - Prefer simple implementations during early phases.
 - Every major architectural change must be documented.
-- Do not implement future phases prematurely.
+- Do not implement future phases prematurely. `PRODUCT_VISION.md` is not a work order.
 - Design for AWS Free Tier deployability, cost efficiency, and resource cleanup (section 11). Do not implement AWS until an increment explicitly authorizes it.
 - Do not introduce NAT Gateways, always-on multi-service clouds, or other high-baseline AWS cost as a default.
 
 ---
 
-## 13. Evolution
+## 14. Evolution
 
 Forge is intentionally designed to evolve.
 
@@ -579,15 +625,15 @@ Control Plane
      App    App    App
 ```
 
-Multi-node scheduling, distributed builds, advanced networking, observability, autoscaling, and other production capabilities must be introduced only in their appropriate roadmap phases.
+Multi-node scheduling, distributed builds, advanced networking, observability, autoscaling, AWS, and other production capabilities must be introduced only in their appropriate roadmap phases.
 
 Do not prematurely implement distributed infrastructure.
 
-The first cloud evolution, when authorized, must stay inside the Free Tier envelope in section 11. Scaling off the Free Tier is a later, explicit choice — not the default shape of the first AWS deploy.
+The first cloud evolution, when authorized (Phase 8), must stay inside the Free Tier envelope in section 11. Scaling off the Free Tier is a later, explicit choice — not the default shape of the first AWS deploy.
 
 ---
 
-## 14. Architecture Decision Rule
+## 15. Architecture Decision Rule
 
 When an implementation decision is ambiguous:
 
@@ -597,6 +643,7 @@ When an implementation decision is ambiguous:
 - Avoid unnecessary dependencies.
 - Avoid premature distributed systems.
 - Prefer designs that remain cheap on AWS Free Tier and that clean up unused resources.
+- Do not copy another PaaS’s topology because it is popular.
 - Document significant decisions.
 - Verify the implementation before moving to the next increment.
 

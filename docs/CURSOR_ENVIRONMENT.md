@@ -2,14 +2,15 @@
 
 This document describes the Cursor engineering environment for Forge.
 
-It is **not** architecture, roadmap, or development-rules source of truth. Those files are:
+It is **not** architecture, roadmap, product vision, or development-rules source of truth. Those files are:
 
-- `AGENTS.md`
-- `docs/ARCHITECTURE.md`
-- `docs/ROADMAP.md`
-- `docs/DEVELOPMENT_RULES.md`
+- `AGENTS.md` — agent operating contract
+- `docs/PRODUCT_VISION.md` — long-term direction; does **not** authorize implementation
+- `docs/ARCHITECTURE.md` — technical architecture
+- `docs/ROADMAP.md` — which phase is current; `START PHASE N` authorizes work
+- `docs/DEVELOPMENT_RULES.md` — how we write and ship code
 
-If those three `docs/` files are empty, do not invent their contents.
+If `ARCHITECTURE.md`, `ROADMAP.md`, or `DEVELOPMENT_RULES.md` are empty, do not invent their contents.
 
 Implementation phases are gated by `START PHASE N` in chat and by `docs/ROADMAP.md`. This file only describes Cursor tooling.
 
@@ -116,7 +117,7 @@ Authenticate via Cursor OAuth. Broaden writes only when needed.
 | GitHub MCP now | No repository or remote |
 | Cloudflare MCP now | Research only; would require account auth |
 | Neon / unrestricted DB MCP | Production-shaped access; too early |
-| A cloud vendor as “the Forge target” | Forge is a self-hosted PaaS; architecture docs are empty |
+| A cloud vendor as “the Forge target” | Forge is a self-hosted PaaS; cloud is a future roadmap phase, not an MCP default |
 
 ### Evaluation matrix (before adding anything)
 

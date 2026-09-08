@@ -28,178 +28,278 @@ Each phase must produce a working, understandable system before the next phase b
 
 Future-phase work must not be implemented merely because it is known to be required later.
 
+`docs/PRODUCT_VISION.md` is long-term direction. It does **not** authorize implementation. This file is the implementation sequence. `START PHASE N` in chat is the only authorization to begin a phase.
+
+**Competitive goals must never override security, correctness, architectural integrity, phase discipline, or maintainability.**
+
 ---
 
-## 2. Phase 0 — Local Deployment Foundation
+## 2. Current, next, and future
+
+| Kind | Phases | Meaning |
+|------|--------|---------|
+| **CURRENT** | 0, 1, 2 | Implemented and complete. Local loopback PaaS. |
+| **NEXT** | 3 | Next authorized work only after `START PHASE 3`. |
+| **FUTURE** | 4–10 | Documented sequence. Not authorized. |
+
+Security requirements apply in every phase. Phases 3 and 5 add **depth**; they do not mark the start of security.
+
+### Why this order (future phases)
+
+```text
+0 Local foundation          COMPLETE
+1 Core PaaS                 COMPLETE
+2 Developer experience      COMPLETE
+3 Security hardening        NEXT
+4 Observability
+5 Production hardening      (single node: TLS, quotas, backup, rate limits)
+6 Multi-node infrastructure
+7 Advanced platform
+8 Cloud / AWS readiness
+9 High availability / scaling
+10 Multi-region / operational intelligence
+```
+
+**Reasoning:** do not distribute or publicly expose an unauthenticated, weakly observed control plane. Authentication and deeper isolation (Phase 3) come before leaving loopback. Observability (Phase 4) comes before calling the system production. Production hardening (Phase 5) stays **single-node** so TLS, backups, and quotas exist before a second worker. Multi-node (Phase 6) waits until one node is trustworthy. Advanced PaaS features (Phase 7) wait until operation is honest. AWS (Phase 8) maps existing roles; it is not a rewrite. HA and multi-region come last.
+
+This **reorders unimplemented work**. Former “Phase 5 multi-node before Phase 6 production hardening” is rejected as less safe. Completed Phases 0–2 keep their numbers and status.
+
+Phase 2 already ships **image rollback**. Later phases may add traffic-shifting strategies; they must not describe rollback as unimplemented.
+
+---
+
+## 3. Phase 0 — Local Deployment Foundation
+
+**Status: COMPLETE** (authorized `START PHASE 0`)
 
 ### Objective
 
 Build the smallest complete deployment path on a local machine.
 
-The goal is to prove the fundamental Forge loop:
-
 ```text
-Git Repository
-      ↓
-Detect
-      ↓
-Build
-      ↓
-Container
-      ↓
-Run
-      ↓
-Health Check
-      ↓
-Caddy
-      ↓
-Accessible Application
+Git Repository → Detect → Build → Container → Run → Health Check → Caddy → Accessible Application
 ```
 
-### Initial components
+### Capabilities (implemented)
 
-Phase 0 establishes the minimum viable foundation for:
+- Go API, Next.js dashboard, PostgreSQL, Redis, worker, Docker runtime, Caddy, local Compose
+- Loopback-only publication (`127.0.0.1`)
+- Explicit deployment state machine through LIVE
 
-- Go API
-- Next.js dashboard
-- PostgreSQL
-- Redis
-- worker
-- Docker-based application execution
-- Caddy reverse proxy
-- local development environment
+### Prerequisites
 
-### Phase 0 principles
+None (first phase).
 
-The implementation must remain local.
+### Security requirements
 
-Do not implement:
+User code is untrusted. No host-shell execution of user commands. Loopback binds. Docker isolation for workloads. No AWS.
 
-- cloud deployment
-- multi-node scheduling
-- autoscaling
-- distributed workers
-- production infrastructure
-- advanced observability
-- billing
-- enterprise features
+### Verification / exit criteria (met)
 
-unless explicitly introduced by an approved increment.
+Health, projects, queue, deploy pipeline, Caddy on `127.0.0.1:9080`, dashboard on `127.0.0.1:3000` verified in-phase.
 
-### Incremental development
+### Out of scope (then and still)
 
-Phase 0 is divided into small increments.
-
-Each increment must:
-
-- Have a clearly defined objective.
-- Change only the necessary components.
-- Be implemented.
-- Be verified.
-- Be reviewed.
-- Pass security checks where relevant.
-- Be documented when architectural behavior changes.
+Cloud, multi-node, autoscaling, billing, public DNS, authentication UI.
 
 ---
 
-## 3. Phase 1 — Complete Core PaaS Workflow
+## 4. Phase 1 — Complete Core PaaS Workflow
+
+**Status: COMPLETE** (authorized by implement-Phase-1 request)
 
 ### Objective
 
-Turn the local deployment foundation into a coherent local PaaS workflow.
+Turn the local foundation into a coherent local PaaS workflow.
 
-Implemented (authorized as Phase 1):
+### Capabilities (implemented)
 
-- applications as the deployable unit (`projects` → `applications` → `deployments`)
-- git URL on the application (project still stores the original default URL)
+- Applications as the deployable unit (`projects` → `applications` → `deployments`)
+- Git URL on the application
 - `POST /applications/{id}/deployments` and convenience `POST /projects/{id}/deployments` when the project has exactly one app
-- build/deploy status on the existing state machine, plus `stopped`
-- application log snapshot (`GET /applications/{id}/logs`, `docker logs --tail`)
-- environment CRUD (`GET/PUT/DELETE …/env`) injected at `docker run`
-- live-app health (`GET /applications/{id}/health`)
-- basic management (create/update/delete application, `POST …/stop`)
+- Status machine including `stopped`
+- Log snapshot `GET /applications/{id}/logs`
+- Environment CRUD injected at `docker run`
+- Live-app health `GET /applications/{id}/health`
+- Create/update/delete application, `POST …/stop`
 
-Do **not** implement here: custom domains, rollback, log streaming, authentication, AWS, or multi-node.
+### Prerequisites
 
----
+Phase 0 complete.
 
-## 4. Phase 2 — Developer Experience
+### Security requirements
 
-### Objective
+Env key/value validation; reserved `PORT` / `FORGE_*`; loopback health probes; no client-supplied shell.
 
-Make Forge practical and pleasant to use.
+### Verification / exit criteria (met)
 
-Implemented (authorized as Phase 2):
+Application-scoped deploy, env, logs, health, stop.
 
-- black/red dashboard with deployment history (timestamps, image name, persisted build log)
-- `docker logs -t` snapshots plus `build_log` on the deployment row (still polling, not streaming)
-- environment UX: hide values, bulk KEY=VALUE replace (`PUT /applications/{id}/env/bulk`)
-- build/app settings: `root_directory`, `health_path`, `local_host` (`.localhost` Host route)
-- rollback: `POST /deployments/{id}/rollback` reuses a prior `image_name` (no client-supplied image or command)
-- improved error reporting via stored build output and existing `failed_stage`
+### Historical note
 
-Not in this phase: public custom domains, TLS automation, log websockets, authentication, AWS, multi-node.
+Phase 1 did **not** implement custom domains, rollback, log streaming, authentication, AWS, or multi-node. Rollback arrived in Phase 2.
 
 ---
 
-## 5. Phase 3 — Security Hardening
+## 5. Phase 2 — Developer Experience
+
+**Status: COMPLETE** (authorized `START PHASE 2`)
 
 ### Objective
 
-Strengthen isolation and security around untrusted workloads.
+Make the local PaaS practical to operate.
 
-Areas include:
+### Capabilities (implemented)
 
-- container hardening
-- filesystem restrictions
-- resource limits
-- network restrictions
-- capability reduction
-- secret handling
-- authentication/authorization hardening
-- audit logging
-- abuse prevention
-- supply-chain considerations
+- Dashboard with deployment history, timestamps, persisted `build_log` and `image_name` (rollback artifact; UI need not advertise Docker internals)
+- `docker logs -t` snapshots (polling, not streaming)
+- Env hide-in-UI and bulk `PUT /applications/{id}/env/bulk`
+- Settings: `root_directory`, `health_path`, `local_host` (`.localhost` Host route — not public DNS, not TLS)
+- Rollback: `POST /deployments/{id}/rollback` reuses a prior `image_name` (no client-supplied image or command)
+- `failed_stage` plus stored build output
 
-Security is not deferred entirely until this phase. Security requirements apply from Phase 0 onward.
+### Prerequisites
 
-This phase represents deeper hardening, not the beginning of security.
+Phase 1 complete.
+
+### Security requirements
+
+Path confinement for `root_directory`; health path cannot become SSRF; rollback cannot supply an arbitrary image; dashboard still loopback-only.
+
+### Verification / exit criteria (met)
+
+Settings apply on next deploy; rollback skips fetch/build; dashboard uses existing APIs.
+
+### Out of scope (still future)
+
+Public custom domains, TLS automation, log websockets, authentication, AWS, multi-node.
 
 ---
 
-## 6. Phase 4 — Observability
+## 6. Phase 3 — Security Hardening
+
+**Status: NOT STARTED.** Do not implement until `START PHASE 3`.
 
 ### Objective
 
-Make Forge operationally understandable.
+Deepen isolation and introduce **control-plane identity**. Security already applies; this phase adds capabilities the loopback era deferred.
 
-Potential capabilities:
+### Prerequisites
 
-- structured logs
-- metrics
-- tracing
-- deployment telemetry
-- worker health
-- application health
-- build diagnostics
-- error tracking
+Phases 0–2 complete. Single-node local topology unchanged unless an increment explicitly says otherwise (default: still loopback).
 
-Observability should make it possible to answer:
+### Capabilities (planned increments — split work; do not dump in one PR)
 
-- What happened?
-- Where did it fail?
-- Why did it fail?
-- What is happening now?
+**3.a Control-plane authentication and authorization**
+
+- Authenticate operators
+- Authorize mutating APIs (IDs in the URL are not proof of access)
+- Dashboard login only after the API enforces the same rules
+
+**3.b Workload and build isolation**
+
+- Tighter filesystem, network, and capability reduction beyond current `no-new-privileges` / memory / CPU / pids
+- Build isolation review (docker build remains untrusted execution)
+- Host protection: no Docker socket in workloads (already forbidden; keep it that way)
+
+**3.c Secrets, audit, abuse, supply chain**
+
+- Distinguish operator env metadata from a secret manager (do not pretend Postgres env is a vault)
+- Audit log for security-sensitive control-plane actions
+- Rate / abuse basics if the API is no longer “whoever can hit loopback”
+- Image/dependency review process (documentation and checks), not a marketplace of scanners as a substitute for isolation
+
+### Security requirements
+
+Do not weaken loopback until 3.a exists. Do not expose Caddy on `0.0.0.0` in this phase unless 3.a is done **and** the increment names the bind. Tenant isolation design must not assume a second tenant can read another’s env or logs.
+
+### Verification / exit criteria
+
+- Unauthenticated mutating calls fail when auth is enabled
+- Workload still cannot reach control-plane Redis/Postgres/Caddy admin
+- Secrets not in logs
+- Tests for authorization negatives, not only happy paths
+- Security review recorded
 
 ---
 
-## 7. Phase 5 — Multi-Node Infrastructure
+## 7. Phase 4 — Observability
+
+**Status: FUTURE.** Do not implement until `START PHASE 4`.
 
 ### Objective
 
-Move beyond the initial single-machine architecture.
+Make failures and live behavior diagnosable without SSH folklore.
 
-Potential capabilities:
+### Prerequisites
+
+Phase 3 complete enough that telemetry cannot become an unauthenticated data leak of other tenants’ logs.
+
+### Capabilities (increments)
+
+- Structured control-plane logs
+- Runtime log streaming (replacing snapshot-only UX as an *addition*, snapshots may remain)
+- Metrics for API, worker, deploy durations, container health
+- Tracing later, not in the first observability increment
+- Alerts only after metrics have an owner and a destination
+
+### Security requirements
+
+Logs and traces must not include secrets. Streaming endpoints are authorized. Do not ship telemetry sidecars that run as privileged host agents without review.
+
+### Verification / exit criteria
+
+An operator can answer what happened, where it failed, and what is happening now for a failed and a live deploy, using Forge interfaces — not only Docker Desktop.
+
+---
+
+## 8. Phase 5 — Production Hardening
+
+**Status: FUTURE.** Still **one machine**. Do not implement until `START PHASE 5`.
+
+### Objective
+
+Prepare realistic **external** use of a single node: encryption in transit, quotas, backup, recovery, operational limits.
+
+### Prerequisites
+
+Phase 3 (auth) and Phase 4 (enough observability to see abuse and failed deploys).
+
+### Capabilities (increments)
+
+- TLS for operator-facing and app-facing entry (automation such as ACME is in scope here; **custom DNS product UX** may wait for Phase 7)
+- Resource quotas beyond per-container flags (disk, deploy concurrency, log retention)
+- Rate limiting
+- Backup/restore of PostgreSQL (and documented Redis-loss behavior)
+- Disaster-recovery **runbook** and restore test; multi-region DR is Phase 10
+- Secure secret management (dedicated secret store or encrypted-at-rest design — not plaintext-equivalent logging)
+- Upgrade/migration strategy for control-plane schema
+
+### Security requirements
+
+TLS does not replace authorization. Backups are secrets. Restore drills must not use production credentials in git.
+
+### Verification / exit criteria
+
+Restore tested. TLS verified. Quotas enforced with tests. No “bind to the world” without auth.
+
+---
+
+## 9. Phase 6 — Multi-Node Infrastructure
+
+**Status: FUTURE.** Do not implement until `START PHASE 6`.
+
+### Objective
+
+More than one worker/runtime node without rewriting the control plane.
+
+### Prerequisites
+
+Phase 5. A scheduler is useless if the API is still a loopback toy without backups.
+
+### Capabilities
+
+Worker registration, node health, placement, capacity, failure handling, workload migration **concepts** implemented incrementally.
 
 ```text
 Control Plane
@@ -212,81 +312,142 @@ Scheduler
 Node Node Node
 ```
 
-Potential areas:
+### Security requirements
 
-- worker registration
-- node health
-- scheduling
-- workload placement
-- capacity tracking
-- workload migration
-- failure handling
+Node join must be authenticated. Workloads still cannot reach other tenants or the control plane. Network policies between nodes are explicit.
 
-Distributed infrastructure must not be introduced until the single-node system is understood and stable.
+### Verification / exit criteria
+
+A second node can run a deploy the API requested. Failure of one node does not require deleting PostgreSQL. No AWS required for this phase (local or lab VMs are enough).
 
 ---
 
-## 8. Phase 6 — Production Hardening
+## 10. Phase 7 — Advanced Platform Capabilities
+
+**Status: FUTURE.** Do not implement until `START PHASE 7`.
 
 ### Objective
 
-Prepare Forge for realistic external usage.
+PaaS product depth **on** a secure, observable, multi-node-capable (or still single-node if 6 is skipped by an explicit later decision) foundation.
 
-Potential areas:
+### Prerequisites
 
-- stronger authentication
-- rate limiting
-- resource quotas
-- backup/restore
-- disaster recovery
-- secure secret management
-- TLS automation
-- stronger isolation
-- operational tooling
-- upgrade/migration strategy
+Phase 5 at minimum. Phase 6 if the feature needs more than one node.
 
----
+### Capabilities (pick increments; do not implement the list at once)
 
-## 9. Phase 7 — Advanced Platform Capabilities
+- Preview / staging vs production **semantics**
+- Zero-downtime / rolling / canary **on top of existing rollback**
+- Public custom domains (DNS), building on Phase 5 TLS
+- Persistent volumes
+- Scheduled jobs
+- Managed-style databases/Redis for **apps** (not replacing control-plane Postgres/Redis)
+- Service discovery and explicit app-to-app networking
+- Team permissions (beyond single-operator auth)
+- Build caching with cache poisoning treated as a security issue
+- Extensibility hooks (detect/notify) without host exec
 
-Potential future areas:
+**Already exists (do not re-list as greenfield):** image rollback, HTTP health gate, env vars, log snapshots, `.localhost` DX.
 
-- autoscaling
-- deployment strategies
-- rollbacks
-- preview environments
-- custom domains
-- persistent volumes
-- scheduled jobs
-- managed databases
-- service discovery
-- advanced networking
-- team/project permissions
-- billing
+**Not in this phase:** billing as a reason to weaken isolation; AWS account creation.
 
-These are future capabilities, not commitments to implement them immediately.
+### Security requirements
+
+Multi-tenant features require tenant isolation tests. Volumes must not mount host secrets. Custom domains must not steal Host routing from other apps (the local slug uniqueness rule is the seed of this).
+
+### Verification / exit criteria
+
+Each increment has tests and a security review. Rollback + new strategy coexist.
 
 ---
 
-## 10. Phase 8 — Long-Term Platform Evolution
+## 11. Phase 8 — Cloud / AWS Readiness and Deployment
 
-Possible long-term directions include:
+**Status: FUTURE.** Do not implement until `START PHASE 8`.
 
-- multi-region infrastructure
-- high availability
-- distributed scheduling
-- advanced workload isolation
-- sophisticated build caching
-- infrastructure-as-code integration
-- plugin/extensibility systems
-- advanced developer tooling
-- agent-assisted operations
+### Objective
 
-These are deliberately deferred.
+Run the **same roles** on AWS inside the Free Tier envelope (`docs/ARCHITECTURE.md` section 11). No rewrite into a different product.
+
+### Prerequisites
+
+Phase 5. Prefer Phase 6 if more than one worker is in scope. Explicit operator authorization for AWS accounts and spend.
+
+### Capabilities
+
+- Documented mapping: API, PostgreSQL, queue, worker, runtime, proxy
+- Adapters behind existing interfaces (`JobQueue`, store, runtime, proxy)
+- Idle-cheap, no NAT Gateway as default, cleanup of unused resources
+- Self-hosted Compose remains valid
+
+### Security requirements
+
+IAM least privilege. No long-lived keys in git. Workloads still untrusted. Cloud does not justify `--privileged` or Docker socket mounts.
+
+### Verification / exit criteria
+
+A named, authorized deploy that an operator can tear down. Cost assumptions documented. Local path still works.
+
+**Do not start this phase as a side effect of documenting it.**
 
 ---
 
-## 11. Phase Gates
+## 12. Phase 9 — High Availability and Scaling
+
+**Status: FUTURE.** Do not implement until `START PHASE 9`.
+
+### Objective
+
+Survive node loss and grow capacity **after** the control plane is already production-shaped.
+
+### Prerequisites
+
+Phase 6 and Phase 8 (or a documented self-hosted HA lab that is not AWS). Autoscaling is not a substitute for quotas (Phase 5).
+
+### Capabilities
+
+HA for control-plane data, worker redundancy, autoscaling **with** resource enforcement.
+
+### Security requirements
+
+Scale-out must not scale privileges. Autoscaling policies cannot bypass isolation.
+
+### Verification / exit criteria
+
+Documented failover test. Cost of extra capacity is explicit.
+
+---
+
+## 13. Phase 10 — Multi-Region and Operational Intelligence
+
+**Status: FUTURE.** Do not implement until `START PHASE 10`.
+
+### Objective
+
+Multi-region operation and better diagnosis — including optional AI **summaries** of signals Forge already collects.
+
+### Prerequisites
+
+Phase 9 or a written exception. Tracing and metrics from Phase 4 must exist before “intelligence” that claims to explain them.
+
+### Capabilities
+
+- Multi-region data and routing (with latency and consistency trade-offs documented)
+- Cross-region DR beyond Phase 5 backups
+- Deployment intelligence: explain failed stages using stored logs/metrics
+- AI-assisted diagnostics **read-only** unless a later increment defines a tool sandbox
+
+### Security requirements
+
+Models do not get cloud credentials or Docker sockets. Prompt injection is treated as untrusted input. No host execution of model-emitted commands.
+
+### Verification / exit criteria
+
+Intelligence features cite evidence from Forge data. Multi-region runbook exists. No silent production AWS expansion.
+
+---
+
+## 14. Phase Gates
 
 A phase should not be considered complete merely because its code exists.
 
@@ -304,9 +465,11 @@ Before moving forward:
 
 **Review gate** — the changes have been independently reviewed.
 
+**Vision gate** — work matches `PRODUCT_VISION.md` principles without pulling future features forward.
+
 ---
 
-## 12. Current Status
+## 15. Current Status
 
 **Phase 0 — COMPLETE** (authorized `START PHASE 0`)
 
@@ -314,7 +477,7 @@ Before moving forward:
 
 **Phase 2 — COMPLETE** (authorized `START PHASE 2`)
 
-Do not start Phase 3 until the developer says `START PHASE 3`.
+**Phase 3 — NOT STARTED.** Do not start until the developer says `START PHASE 3`.
 
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
@@ -326,16 +489,16 @@ Increments 0.4–0.8 (done): `deployments` table and explicit status machine; `P
 
 Phase 1 (done): `applications` + `application_env_vars`; deployments belong to an application; worker fetches the app repo and injects env; log snapshot, live health, stop; dashboard application page.
 
-Phase 2 (done): application settings (`root_directory`, `health_path`, `local_host`); persisted `build_log` / `image_name`; rollback from a prior image; bulk env replace; black/red dashboard history. Not public DNS/TLS, not log streaming, not auth.
+Phase 2 (done): application settings (`root_directory`, `health_path`, `local_host`); persisted `build_log` / `image_name`; rollback from a prior image; bulk env replace; dashboard history. Not public DNS/TLS, not log streaming, not auth, not AWS.
 
 ---
 
-## 13. Roadmap Rule
+## 16. Roadmap Rule
 
 The roadmap describes direction.
 
 It does not authorize implementation.
 
-Knowing that a feature exists in Phase 5 does not authorize implementing it during Phase 0.
+Knowing that a feature exists in Phase 8 does not authorize implementing it during Phase 2.
 
 The current phase and current increment are always authoritative.

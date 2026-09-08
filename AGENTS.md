@@ -11,6 +11,8 @@ docs/ROADMAP.md
 docs/DEVELOPMENT_RULES.md
 ```
 
+`docs/PRODUCT_VISION.md` is long-term product direction. Read it when planning beyond the current phase or resolving competitive/product questions. It does **not** authorize implementation and must not be used to pull future features into the current phase.
+
 When modifying the engineering environment, also read:
 
 ```text
@@ -87,6 +89,14 @@ The coding and engineering standards are defined in:
 ```text
 docs/DEVELOPMENT_RULES.md
 ```
+
+Long-term product direction is defined in:
+
+```text
+docs/PRODUCT_VISION.md
+```
+
+That vision does **not** authorize implementation. Competitive or “better than Vercel/Railway/…” goals must never override security, correctness, architectural integrity, phase discipline, or maintainability.
 
 The long-term business goal is to eventually generate modest real revenue, approximately ₹5,000/month, from real users.
 
@@ -770,6 +780,8 @@ docs/DEVELOPMENT_RULES.md
 
 do not silently choose one.
 
+`docs/PRODUCT_VISION.md` is direction, not current behavior. If code is “behind” the vision, that is expected until the matching roadmap phase is authorized. Do not “fix” the gap by implementing the vision early.
+
 Determine whether:
 
 ### Case 1 — Implementation Is Wrong
@@ -1173,6 +1185,7 @@ Read that file when modifying or configuring the engineering environment.
 It is **not** a substitute for:
 
 ```text
+docs/PRODUCT_VISION.md
 docs/ARCHITECTURE.md
 docs/ROADMAP.md
 docs/DEVELOPMENT_RULES.md
@@ -1199,6 +1212,8 @@ docs/DEVELOPMENT_RULES.md
 ```
 
 do NOT invent their contents.
+
+If `docs/PRODUCT_VISION.md` is missing or empty, do not invent a competitive product strategy. Report the gap. Do not treat a missing vision file as permission to copy another PaaS.
 
 Report the missing documentation.
 

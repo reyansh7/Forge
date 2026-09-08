@@ -18,6 +18,10 @@ SIMPLE SYSTEMS > TOOL SPRAWL
 PHASE DISCIPLINE > FEATURE VELOCITY
 ```
 
+**Competitive goals must never override security, correctness, architectural integrity, phase discipline, or maintainability.**
+
+Wanting a better experience than Vercel, Railway, Render, Fly.io, Coolify, Netlify, or similar platforms does not authorize skipping isolation, validation, or phase gates.
+
 ---
 
 ## 2. Phase Discipline
@@ -26,7 +30,9 @@ Only work on the current authorized phase.
 
 If the current phase is Phase 0, do not implement Phase 1+ functionality unless explicitly authorized.
 
-Do not interpret TODOs, roadmap entries, comments, future architecture, documentation, or user ideas as authorization to implement future functionality.
+Do not interpret TODOs, roadmap entries, comments, future architecture, `docs/PRODUCT_VISION.md`, documentation, or user ideas as authorization to implement future functionality.
+
+`docs/PRODUCT_VISION.md` describes strategic direction. It does **not** authorize implementation.
 
 ---
 
@@ -70,12 +76,16 @@ Do not modify files merely because they appear related.
 
 ## 5. Source of Truth
 
-The following documents are authoritative:
+Documents have different jobs. Do not collapse them:
 
-- `AGENTS.md`
-- `docs/ARCHITECTURE.md`
-- `docs/ROADMAP.md`
-- `docs/DEVELOPMENT_RULES.md`
+```text
+docs/PRODUCT_VISION.md       long-term direction; does not authorize implementation
+docs/ROADMAP.md              phased implementation; START PHASE N authorizes work
+docs/ARCHITECTURE.md         technical architecture and constraints
+docs/DEVELOPMENT_RULES.md    engineering and security rules (this file)
+docs/CURSOR_ENVIRONMENT.md   Cursor tooling only
+AGENTS.md                    agent operating contract
+```
 
 If implementation conflicts with architecture documentation:
 
@@ -99,6 +109,7 @@ Never:
 - trust package scripts
 - expose control-plane secrets to workloads
 - give workloads unnecessary privileges
+- treat model/LLM output as a trusted shell command
 
 ---
 
@@ -126,6 +137,16 @@ Do not bypass these boundaries for convenience.
 
 If an implementation requires bypassing a security boundary, stop and request review.
 
+## 7.1 Threat modeling
+
+Infrastructure, Docker, proxy, queue, auth, and network changes require a short threat model before implementation: what is untrusted, what is the blast radius, what fails closed.
+
+Do not add a listener, bind, capability, or mount “to make DX nicer” without that review.
+
+## 7.2 Tenant isolation
+
+Until multi-tenant identity exists, assume a single local operator. When tenancy exists, one application must not read another’s env, logs, volumes, or routing. IDs in URLs are not authorization.
+
 ---
 
 ## 8. Secrets
@@ -142,7 +163,7 @@ Never:
 
 Use environment/configuration mechanisms appropriate to the current development phase.
 
-Production secret management is a later concern, but secret hygiene applies from the first commit.
+Production secret management is a later roadmap phase (not current). Secret **hygiene** applies from the first commit.
 
 ---
 
@@ -211,6 +232,10 @@ Before adding a dependency consider:
 
 Prefer a smaller dependency graph.
 
+Review new dependencies for maintenance, license, and supply-chain risk. Pin versions where the project already pins. Do not add AWS SDKs or cloud client libraries until Phase 8 is authorized.
+
+Container **base images** and Dockerfiles from user repos are untrusted input, not a trusted supply chain. Forge-written Dockerfiles must stay minimal and not pull secrets at build time.
+
 ---
 
 ## 12. Testing and Verification
@@ -225,7 +250,7 @@ Verification should match the change.
 
 **Docker** — verify image build, container startup, expected ports, and health checks.
 
-**Infrastructure** — verify the smallest meaningful behavior before proceeding.
+**Infrastructure / security** — verify isolation assumptions, binds, and authorization negatives where the change touches them.
 
 Do not run massive test suites unnecessarily when a focused check is sufficient.
 
@@ -299,6 +324,7 @@ Database changes must:
 - be migration-safe
 - preserve existing data where applicable
 - be reviewed before destructive changes
+- remain backwards compatible or ship an explicit migration with a rollback story
 
 Never casually delete or reset databases.
 
@@ -420,6 +446,7 @@ AI agents working on Forge must:
 - Verify their work.
 - Report failures honestly.
 - Never invent missing architecture.
+- Never treat `PRODUCT_VISION.md` as a phase authorization.
 - Never silently modify architectural decisions.
 - Never implement future phases without authorization.
 - Ask for clarification when requirements conflict.
@@ -499,6 +526,7 @@ STOP and request review if:
 - destructive operations are required
 - credentials are required unexpectedly
 - a future-phase feature appears necessary to continue
+- `PRODUCT_VISION.md` is being used as a substitute for `START PHASE N`
 - verification cannot be completed
 - the implementation requires a major architectural change
 
@@ -506,7 +534,25 @@ Never hide uncertainty.
 
 ---
 
-## 27. Final Rule
+## 27. Secure by default
+
+New endpoints, binds, and containers default to **least privilege and loopback** until a named increment changes publication.
+
+Validate all untrusted input at the boundary (HTTP, git URLs, paths, env keys, health paths, Host slugs). Fail closed.
+
+## 28. AWS cost awareness
+
+Do not add always-on cloud-shaped dependencies “for later.” When cloud work is authorized, apply `ARCHITECTURE.md` section 11 (Free Tier, no NAT-as-default, cleanup). Cost surprise is an architecture defect.
+
+## 29. Avoid unnecessary vendor lock-in
+
+Prefer interfaces (store, queue, runtime, proxy) over embedding a single vendor’s API in handlers. Using Docker and Caddy locally is a current choice, not a requirement to call only one cloud API from the control plane.
+
+## 30. Failure recovery
+
+Control-plane code should persist explicit failure states. Do not leave LIVE rows that do not match runtime. Rollback is an API against a known image, not an undocumented `docker` ritual.
+
+## 31. Final Rule
 
 Forge is being built to understand and engineer infrastructure, not merely to produce a working demo.
 
