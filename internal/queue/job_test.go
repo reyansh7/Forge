@@ -35,8 +35,8 @@ func TestParseJobRejectsMissingType(t *testing.T) {
 }
 
 func TestAllowedType(t *testing.T) {
-	if !AllowedType(TypeExample) {
-		t.Fatal("example must be allowed")
+	if !AllowedType(TypeExample) || !AllowedType(TypeDeploy) {
+		t.Fatal("example and deploy must be allowed")
 	}
 	if AllowedType("shell") || AllowedType("") {
 		t.Fatal("arbitrary types must be rejected")

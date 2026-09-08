@@ -16,11 +16,11 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// Postgres is the control-plane PostgreSQL client for increment 0.2.
+// Postgres is the control-plane PostgreSQL client.
 //
-// Responsibility: connection pool, health Ping, schema migrations, and
-// Project rows. It is Forge's durable store — not a database that user
-// apps will attach later.
+// Responsibility: connection pool, health Ping, schema migrations,
+// Project rows, and Deployment rows. It is Forge's durable store — not
+// a database that user apps will attach later.
 //
 // Called by: cmd/api (startup) and httpapi handlers (via ProjectStore).
 // It calls: PostgreSQL on FORGE_DATABASE_URL (loopback Compose in Phase 0).

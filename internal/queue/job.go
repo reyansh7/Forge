@@ -18,12 +18,14 @@ import (
 	"strings"
 )
 
-// TypeExample is the only job type this increment will run.
-//
-// The worker maps this string to an internal handler. A client cannot
-// send "shell" or a command payload and have it executed — unknown types
-// are rejected at the API and again in the worker (defense in depth).
+// TypeExample is the increment 0.3 demonstration job (log and return).
 const TypeExample = "example"
+
+// TypeDeploy runs the Phase 0 local deployment pipeline.
+//
+// The API is the only caller that may enqueue this type. The payload is
+// a control-plane deployment_id, never a shell command.
+const TypeDeploy = "deploy"
 
 // DefaultKey is the Redis LIST name shared by the API and worker.
 const DefaultKey = "forge:jobs"
@@ -105,7 +107,8 @@ func (j Job) validateForEnqueue() error {
 	return nil
 }
 
-// AllowedType reports whether the API/worker will execute this type.
+// AllowedType reports whether the worker will accept this type.
+// POST /jobs still only allows example; deploy is created via deployments.
 func AllowedType(t string) bool {
-	return t == TypeExample
+	return t == TypeExample || t == TypeDeploy
 }

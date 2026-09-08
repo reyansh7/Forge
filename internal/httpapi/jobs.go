@@ -43,8 +43,9 @@ func (s *Server) enqueueJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobType := req.Type
-	if !queue.AllowedType(jobType) {
+	// POST /jobs is the 0.3 demo path only. Deploy jobs are created by
+	// POST /projects/{id}/deployments so clients cannot pick a payload.
+	if req.Type != queue.TypeExample {
 		writeError(w, http.StatusBadRequest, "unsupported job type")
 		return
 	}

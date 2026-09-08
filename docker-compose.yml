@@ -8,9 +8,9 @@
 # Ports are published on 127.0.0.1 only so another machine on the LAN cannot
 # reach these stores. This is not a production topology.
 #
-# The Go API (`go run ./cmd/api`) and worker (`go run ./cmd/worker`)
-# run on the host and connect to these loopback ports. They are not
-# Compose services in Phase 0 — same pattern as increment 0.1.
+# The Go API (`go run ./cmd/api`), worker (`go run ./cmd/worker`), and
+# Next.js dashboard (`npm run dev` in web/) run on the host and connect
+# to these loopback ports. They are not Compose services in Phase 0.
 
 services:
   postgres:
@@ -44,6 +44,19 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+
+  # Reverse proxy for LIVE user apps. Admin :2019 is loopback-only so a
+  # LAN client cannot rewrite routes. extra_hosts lets Caddy reach app
+  # ports published on the Windows/macOS Docker host.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "127.0.0.1:9080:80"
+      - "127.0.0.1:2019:2019"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   forge_postgres_data:

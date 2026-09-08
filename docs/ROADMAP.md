@@ -108,20 +108,18 @@ Each increment must:
 
 Turn the local deployment foundation into a coherent local PaaS workflow.
 
-Potential capabilities include:
+Implemented (authorized as Phase 1):
 
-- project creation
-- application creation
-- Git repository configuration
-- deployment creation
-- build status
-- deployment status
-- application logs
-- environment configuration
-- health status
-- basic application management
+- applications as the deployable unit (`projects` → `applications` → `deployments`)
+- git URL on the application (project still stores the original default URL)
+- `POST /applications/{id}/deployments` and convenience `POST /projects/{id}/deployments` when the project has exactly one app
+- build/deploy status on the existing state machine, plus `stopped`
+- application log snapshot (`GET /applications/{id}/logs`, `docker logs --tail`)
+- environment CRUD (`GET/PUT/DELETE …/env`) injected at `docker run`
+- live-app health (`GET /applications/{id}/health`)
+- basic management (create/update/delete application, `POST …/stop`)
 
-The exact scope is determined after Phase 0 is stable.
+Do **not** implement here: custom domains, rollback, log streaming, authentication, AWS, or multi-node.
 
 ---
 
@@ -131,19 +129,16 @@ The exact scope is determined after Phase 0 is stable.
 
 Make Forge practical and pleasant to use.
 
-Potential areas:
+Implemented (authorized as Phase 2):
 
-- improved dashboard
-- deployment history
-- better logs
-- environment variable management
-- build configuration
-- application settings
-- custom domains
-- improved error reporting
-- deployment rollback
+- black/red dashboard with deployment history (timestamps, image name, persisted build log)
+- `docker logs -t` snapshots plus `build_log` on the deployment row (still polling, not streaming)
+- environment UX: hide values, bulk KEY=VALUE replace (`PUT /applications/{id}/env/bulk`)
+- build/app settings: `root_directory`, `health_path`, `local_host` (`.localhost` Host route)
+- rollback: `POST /deployments/{id}/rollback` reuses a prior `image_name` (no client-supplied image or command)
+- improved error reporting via stored build output and existing `failed_stage`
 
-Only implement features after their underlying infrastructure is reliable.
+Not in this phase: public custom domains, TLS automation, log websockets, authentication, AWS, multi-node.
 
 ---
 
@@ -313,17 +308,25 @@ Before moving forward:
 
 ## 12. Current Status
 
-**Phase 0 — IN PROGRESS** (authorized `START PHASE 0`)
+**Phase 0 — COMPLETE** (authorized `START PHASE 0`)
 
-**Current increment: 0.3 — Redis job queue + worker foundation**
+**Phase 1 — COMPLETE** (authorized by implement-Phase-1 request)
+
+**Phase 2 — COMPLETE** (authorized `START PHASE 2`)
+
+Do not start Phase 3 until the developer says `START PHASE 3`.
 
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
 Increment 0.2 (done): `projects` table, migrations, and `POST/GET /projects`.
 
-Increment 0.3 (this work): Redis LIST as a transient job queue, `POST /jobs`, and `cmd/worker` consuming an allowlisted `example` job. This increment does **not** clone git, build images, deploy user code, run Caddy, or persist jobs in PostgreSQL.
+Increment 0.3 (done): Redis LIST as a transient job queue, `POST /jobs`, and `cmd/worker` consuming an allowlisted `example` job.
 
-Later Phase 0 increments will add the rest of the local deployment loop.
+Increments 0.4–0.8 (done): `deployments` table and explicit status machine; `POST /projects/{id}/deployments`; worker `deploy` pipeline (fetch, detect, Docker build/run, health check); Caddy on `127.0.0.1:9080`; Next.js dashboard on `127.0.0.1:3000`.
+
+Phase 1 (done): `applications` + `application_env_vars`; deployments belong to an application; worker fetches the app repo and injects env; log snapshot, live health, stop; dashboard application page.
+
+Phase 2 (done): application settings (`root_directory`, `health_path`, `local_host`); persisted `build_log` / `image_name`; rollback from a prior image; bulk env replace; black/red dashboard history. Not public DNS/TLS, not log streaming, not auth.
 
 ---
 

@@ -1,6 +1,6 @@
 // Package store talks to control-plane data stores (Postgres, Redis).
 //
-// Postgres holds durable Forge state (increment 0.2: projects table).
+// Postgres holds durable Forge state (projects, deployments).
 // Redis is still used for PING in /health. Job RPUSH/BLPOP lives in
 // internal/queue, not in this pinger, so health stays a cheap liveness check.
 // These clients are for Forge's own state — not databases that user

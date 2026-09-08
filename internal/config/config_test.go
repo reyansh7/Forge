@@ -35,18 +35,26 @@ func TestLoadDefaultsAddrToLoopback(t *testing.T) {
 	}
 }
 
-func TestLoadWorkerRequiresRedisOnly(t *testing.T) {
-	// Worker must start without Postgres: jobs are not SQL rows.
+func TestLoadWorkerRequiresDatabaseAndRedis(t *testing.T) {
+	// Deployment status is durable: the worker must open Postgres.
 	t.Setenv("FORGE_DATABASE_URL", "")
 	os.Unsetenv("FORGE_DATABASE_URL")
 	t.Setenv("FORGE_REDIS_URL", "redis://127.0.0.1:6379/0")
 
+	if _, err := LoadWorker(); err == nil {
+		t.Fatal("expected error when FORGE_DATABASE_URL is missing")
+	}
+
+	t.Setenv("FORGE_DATABASE_URL", "postgres://forge:forge@127.0.0.1:15432/forge?sslmode=disable")
 	cfg, err := LoadWorker()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.RedisURL != "redis://127.0.0.1:6379/0" {
 		t.Fatalf("RedisURL = %q", cfg.RedisURL)
+	}
+	if cfg.CaddyAdminURL != "http://127.0.0.1:2019" {
+		t.Fatalf("CaddyAdminURL = %q", cfg.CaddyAdminURL)
 	}
 }
 

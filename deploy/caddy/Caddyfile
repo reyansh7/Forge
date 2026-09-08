@@ -1,0 +1,8 @@
+{
+	admin 0.0.0.0:2019
+	auto_https off
+}
+
+:80 {
+	respond "Forge proxy: no live deployment at this path" 404
+}

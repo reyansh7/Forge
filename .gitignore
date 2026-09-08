@@ -12,6 +12,8 @@ credentials.json
 # Dependencies (future)
 node_modules/
 vendor/
+web/.next/
+web/out/
 
 # Go build output
 /bin/

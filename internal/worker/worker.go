@@ -35,7 +35,7 @@ func (h ExampleHandler) Handle(ctx context.Context, job queue.Job) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !queue.AllowedType(job.Type) {
+	if job.Type != queue.TypeExample {
 		return fmt.Errorf("%w: %q", queue.ErrUnknownType, job.Type)
 	}
 	// Do not log Payload. Future jobs may accidentally carry secrets.

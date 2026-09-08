@@ -18,7 +18,9 @@ import (
 
 	"github.com/reyansh7/Forge/internal/config"
 	"github.com/reyansh7/Forge/internal/httpapi"
+	"github.com/reyansh7/Forge/internal/proxy"
 	"github.com/reyansh7/Forge/internal/queue"
+	"github.com/reyansh7/Forge/internal/runtime"
 	"github.com/reyansh7/Forge/internal/store"
 )
 
@@ -70,19 +72,23 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	// Redis LIST queue for POST /jobs. Health still uses RedisPinger (PING).
-	// The handler never issues RPUSH itself — only JobQueue.Enqueue.
+	// Redis LIST queue for POST /jobs and POST /projects/{id}/deployments.
+	// Health still uses RedisPinger (PING). The handler never issues RPUSH.
 	jobs, err := queue.NewRedis(cfg.RedisURL, queue.DefaultKey)
 	if err != nil {
 		return err
 	}
 
 	api := &httpapi.Server{
-		Log:      log,
-		Postgres: pg,
-		Redis:    rdb,
-		Projects: pg,
-		Jobs:     jobs,
+		Log:         log,
+		Postgres:    pg,
+		Redis:       rdb,
+		Projects:    pg,
+		Apps:        pg,
+		Deployments: pg,
+		Jobs:        jobs,
+		Runtime:     runtime.HostDocker{},
+		Router:      proxy.Caddy{AdminURL: cfg.CaddyAdminURL, UpstreamHost: cfg.CaddyUpstreamHost},
 	}
 
 	srv := &http.Server{

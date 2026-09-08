@@ -19,9 +19,14 @@ import (
 // Driver/SQL errors are wrapped and must not be copied into HTTP bodies
 // (they can leak schema or connection details).
 var (
-	ErrNotFound  = errors.New("project not found")
-	ErrInvalidID = errors.New("invalid project id")
+	ErrNotFound  = errors.New("not found")
+	ErrInvalidID = errors.New("invalid id")
+	ErrConflict  = errors.New("conflict")
 )
+
+// DefaultApplicationName is the application created with each project so
+// Phase 0 projects still have a deployable unit after increment 1.1.
+const DefaultApplicationName = "app"
 
 // uuidPattern is the 8-4-4-4-12 hex form Postgres accepts for uuid.
 // Validating in Go means GET /projects/not-a-uuid is 400, not a 500 from
@@ -31,7 +36,35 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 const (
 	maxProjectNameLen = 100
 	maxRepoURLLen     = 2048
+
+	// SampleHelloURL is the Phase 0 bundled sample. The worker copies an
+	// embedded HTTP app; it does not dial a host.
+	SampleHelloURL = "forge://hello"
 )
+
+// UsesBundledHello reports whether fetch should copy the embedded sample
+// instead of cloning.
+//
+// forge://hello is the documented URL. github.com/example/* is GitHub's
+// reserved docs org — it is not a real repo (the worker used to fail
+// with "repository not found"). Mapping it to the sample lets a Phase 0
+// project created from a tutorial placeholder still deploy.
+func UsesBundledHello(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if strings.EqualFold(raw, SampleHelloURL) {
+		return true
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(u.Hostname(), "github.com") && !strings.EqualFold(u.Hostname(), "www.github.com") {
+		return false
+	}
+	path := strings.Trim(u.Path, "/")
+	org, _, _ := strings.Cut(path, "/")
+	return strings.EqualFold(org, "example")
+}
 
 // Project is one row of control-plane state (the Go view of `projects`).
 //
@@ -42,7 +75,7 @@ const (
 // clone, HTTP-GET, or exec the remote. That would be SSRF / untrusted code.
 // No auth in Phase 0 — any client on loopback can insert rows.
 //
-// Deferred: owner user_id, applications, deployments.
+// Deferred: owner user_id. Applications and deployments are Phase 1.
 type Project struct {
 	ID            string
 	Name          string
@@ -112,6 +145,13 @@ func containsCtl(s string) bool {
 // Rejected: file:// (host filesystem), javascript:, data:, empty host.
 // A later clone increment must not find a surprising scheme already stored.
 func validRepositoryURL(raw string) bool {
+	// forge://hello is the Phase 0 bundled sample. It is not a network
+	// fetch — the worker copies an embedded tree. Anything else with
+	// scheme forge is rejected so this cannot become an open alias.
+	if strings.EqualFold(raw, SampleHelloURL) {
+		return true
+	}
+
 	if strings.HasPrefix(raw, "git@") {
 		// SCP-like GitHub/GitLab remote: git@github.com:org/repo.git
 		_, path, ok := strings.Cut(raw, ":")
@@ -133,6 +173,12 @@ func validRepositoryURL(raw string) bool {
 // ParseProjectID canonicalizes a path id. Unknown shape → ErrInvalidID
 // (HTTP 400), not a database error (HTTP 500).
 func ParseProjectID(id string) (string, error) {
+	return ParseUUID(id)
+}
+
+// ParseUUID canonicalizes a path id. Unknown shape → ErrInvalidID
+// (HTTP 400), not a database error (HTTP 500).
+func ParseUUID(id string) (string, error) {
 	id = strings.TrimSpace(id)
 	if !uuidPattern.MatchString(id) {
 		return "", ErrInvalidID
@@ -151,8 +197,14 @@ func (p *Postgres) CreateProject(ctx context.Context, in ProjectInput) (Project,
 		return Project{}, err
 	}
 
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Project{}, fmt.Errorf("begin create project: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var out Project
-	err = p.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO projects (name, repository_url)
 		VALUES ($1, $2)
 		RETURNING id::text, name, repository_url, created_at, updated_at
@@ -165,6 +217,18 @@ func (p *Postgres) CreateProject(ctx context.Context, in ProjectInput) (Project,
 	)
 	if err != nil {
 		return Project{}, fmt.Errorf("insert project: %w", err)
+	}
+
+	// Phase 1: every project has at least one application. The repo URL
+	// lives on the application; the project copy is the original default.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO applications (project_id, name, repository_url)
+		VALUES ($1::uuid, $2, $3)
+	`, out.ID, DefaultApplicationName, in.RepositoryURL); err != nil {
+		return Project{}, fmt.Errorf("insert default application: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Project{}, fmt.Errorf("commit create project: %w", err)
 	}
 	return out, nil
 }

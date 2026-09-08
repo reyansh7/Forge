@@ -51,6 +51,18 @@ func TestEnqueueJobAccepted(t *testing.T) {
 	}
 }
 
+func TestEnqueueJobRejectsDeployType(t *testing.T) {
+	// Deploy must go through POST /projects/{id}/deployments so the
+	// client cannot choose an arbitrary payload.
+	srv := jobServer(&stubJobs{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader([]byte(`{"type":"deploy"}`)))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
 func TestEnqueueJobRejectsUnknownType(t *testing.T) {
 	srv := jobServer(&stubJobs{})
 	rec := httptest.NewRecorder()

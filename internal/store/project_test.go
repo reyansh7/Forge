@@ -17,6 +17,39 @@ func TestMigrationFileNamesAreVersioned(t *testing.T) {
 	if names[0] != "0001_projects.sql" {
 		t.Fatalf("first migration = %q, want 0001_projects.sql", names[0])
 	}
+	if len(names) < 2 || names[1] != "0002_deployments.sql" {
+		t.Fatalf("second migration = %v, want 0002_deployments.sql", names)
+	}
+	if len(names) < 3 || names[2] != "0003_applications.sql" {
+		t.Fatalf("third migration = %v, want 0003_applications.sql", names)
+	}
+	if len(names) < 4 || names[3] != "0004_one_live_per_application.sql" {
+		t.Fatalf("fourth migration = %v, want 0004_one_live_per_application.sql", names)
+	}
+}
+
+func TestUsesBundledHello(t *testing.T) {
+	if !UsesBundledHello(SampleHelloURL) {
+		t.Fatal("forge://hello")
+	}
+	if !UsesBundledHello("https://github.com/example/forge.git") {
+		t.Fatal("github.com/example must use the bundled sample")
+	}
+	if UsesBundledHello("https://github.com/octocat/Hello-World") {
+		t.Fatal("real orgs must not be rewritten to the sample")
+	}
+}
+
+func TestValidateProjectInputAcceptsForgeHello(t *testing.T) {
+	if _, err := ValidateProjectInput("hello", SampleHelloURL); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateProjectInputRejectsArbitraryForge(t *testing.T) {
+	if _, err := ValidateProjectInput("x", "forge://other"); err == nil {
+		t.Fatal("expected error")
+	}
 }
 
 func TestValidateProjectInputAcceptsHTTPS(t *testing.T) {
