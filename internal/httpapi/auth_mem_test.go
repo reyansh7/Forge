@@ -26,6 +26,7 @@ type memAuth struct {
 	sessions   map[string]string // token hash → user id
 	sessionExp map[string]time.Time
 	audits     []store.AuditEvent
+	seq        int
 }
 
 func newMemAuth() *memAuth {
@@ -49,7 +50,14 @@ func populatedAuth() *memAuth {
 	m.sessions[store.HashSessionToken(testOtherToken)] = testOtherUserID
 	m.sessionExp[store.HashSessionToken(testSessionToken)] = exp
 	m.sessionExp[store.HashSessionToken(testOtherToken)] = exp
+	m.seq = 2
 	return m
+}
+
+func (m *memAuth) CreateUser(_ context.Context, username, passwordHash string) (store.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.insertUserLocked(username, passwordHash)
 }
 
 func (m *memAuth) UserCount(context.Context) (int, error) {
@@ -75,9 +83,15 @@ func (m *memAuth) insertUserLocked(username, passwordHash string) (store.User, e
 	if _, ok := m.byName[toLower(name)]; ok {
 		return store.User{}, store.ErrConflict
 	}
+	m.seq++
 	id := testUserID
-	if len(m.users) != 0 {
+	switch m.seq {
+	case 1:
+		id = testUserID
+	case 2:
 		id = testOtherUserID
+	default:
+		id = "00000000-0000-4000-8000-bbbbbbbbbb" + itoaDigit(m.seq%10)
 	}
 	u := store.User{
 		ID:           id,

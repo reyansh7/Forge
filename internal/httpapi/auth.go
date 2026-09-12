@@ -24,6 +24,7 @@ const (
 type IdentityStore interface {
 	UserCount(ctx context.Context) (int, error)
 	CreateFirstUser(ctx context.Context, username, passwordHash string) (store.User, error)
+	CreateUser(ctx context.Context, username, passwordHash string) (store.User, error)
 	GetUserByUsername(ctx context.Context, username string) (store.User, error)
 	LookupSession(ctx context.Context, tokenHash string) (store.User, error)
 	CreateSession(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
@@ -54,7 +55,7 @@ func ActorFrom(ctx context.Context) (Actor, bool) {
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isPublicPath(r.Method, r.URL.Path) {
+		if isPublicPath(r.Method, canonicalAPIPath(r.URL.Path)) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -81,6 +82,25 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	})
 }
 
+// canonicalAPIPath maps the dashboard rewrite prefix and trailing
+// slashes onto the mux paths. Next.js sometimes forwards
+// /forge-api/auth/signup instead of /auth/signup; without this, withAuth
+// treats a public route as protected and returns 401.
+func canonicalAPIPath(path string) string {
+	p := strings.TrimSpace(path)
+	p = strings.TrimSuffix(p, "/")
+	if rest, ok := strings.CutPrefix(p, "/forge-api"); ok {
+		p = rest
+	}
+	if p == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
+}
+
 func isPublicPath(method, path string) bool {
 	switch {
 	case method == http.MethodGet && path == "/health":
@@ -88,6 +108,8 @@ func isPublicPath(method, path string) bool {
 	case method == http.MethodGet && path == "/auth/status":
 		return true
 	case method == http.MethodPost && path == "/auth/bootstrap":
+		return true
+	case method == http.MethodPost && path == "/auth/signup":
 		return true
 	case method == http.MethodPost && path == "/auth/login":
 		return true
@@ -99,15 +121,20 @@ func isPublicPath(method, path string) bool {
 }
 
 func bearerOrCookie(r *http.Request) string {
+	// Cookie is what this browser last received from Set-Cookie.
+	// Prefer it over Authorization so a leftover dashboard Bearer
+	// from a previous operator cannot keep that operator signed in
+	// after a new login replaced the cookie.
+	if c, err := r.Cookie(sessionCookieName); err == nil {
+		if v := strings.TrimSpace(c.Value); v != "" {
+			return v
+		}
+	}
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(strings.ToLower(h), "bearer ") {
 		return strings.TrimSpace(h[7:])
 	}
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(c.Value)
+	return ""
 }
 
 func clientIP(r *http.Request) string {
@@ -129,8 +156,9 @@ func (s *Server) gate() *attemptGate {
 }
 
 type authCredentials struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+	PasswordConfirm string `json:"password_confirm"`
 }
 
 type authUserResponse struct {
@@ -204,13 +232,90 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		s.logger().Error("claim orphaned projects failed", "err", err)
 	}
 
-	token, err := s.issueSession(ctx, w, u)
+	token, err := s.issueSession(ctx, w, r, u)
 	if err != nil {
 		s.logger().Error("bootstrap session failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
 	s.audit(r, u.ID, "bootstrap", "user", u.ID, map[string]string{"username": u.Username})
+	writeJSON(w, http.StatusCreated, authSessionResponse{
+		Token: token,
+		User:  authUserResponse{ID: u.ID, Username: u.Username},
+	})
+}
+
+func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
+	// Sign-up creates an operator with their own owner_id. Projects
+	// created after this session belong only to that user. This is
+	// still local identity (Phase 3), not team roles (later).
+	// Open registration is acceptable on loopback; do not keep it if
+	// the API is later published without an invite gate.
+	if s.Auth == nil {
+		writeError(w, http.StatusInternalServerError, "auth store is not configured")
+		return
+	}
+	if !s.gate().allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "too many attempts")
+		return
+	}
+	var req authCredentials
+	if !decodeJSON(r, w, &req) {
+		return
+	}
+	if req.PasswordConfirm != req.Password {
+		writeError(w, http.StatusBadRequest, "passwords do not match")
+		return
+	}
+	username, err := store.ValidateUsername(req.Username)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	hash, err := store.HashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	n, err := s.Auth.UserCount(ctx)
+	if err != nil {
+		s.logger().Error("signup count failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to create account")
+		return
+	}
+
+	var u store.User
+	if n == 0 {
+		u, err = s.Auth.CreateFirstUser(ctx, username, hash)
+		if err == nil {
+			if _, claimErr := s.Auth.ClaimOrphanedProjects(ctx, u.ID); claimErr != nil {
+				s.logger().Error("claim orphaned projects failed", "err", claimErr)
+			}
+		}
+	} else {
+		u, err = s.Auth.CreateUser(ctx, username, hash)
+	}
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "username is already taken")
+		return
+	}
+	if err != nil {
+		s.logger().Error("signup user failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to create account")
+		return
+	}
+
+	token, err := s.issueSession(ctx, w, r, u)
+	if err != nil {
+		s.logger().Error("signup session failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to create session")
+		return
+	}
+	s.audit(r, u.ID, "signup", "user", u.ID, map[string]string{"username": u.Username})
 	writeJSON(w, http.StatusCreated, authSessionResponse{
 		Token: token,
 		User:  authUserResponse{ID: u.ID, Username: u.Username},
@@ -251,7 +356,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := s.issueSession(ctx, w, u)
+	token, err := s.issueSession(ctx, w, r, u)
 	if err != nil {
 		s.logger().Error("login session failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to create session")
@@ -289,7 +394,16 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, authUserResponse{ID: actor.UserID, Username: actor.Username})
 }
 
-func (s *Server) issueSession(ctx context.Context, w http.ResponseWriter, u store.User) (string, error) {
+func (s *Server) issueSession(ctx context.Context, w http.ResponseWriter, r *http.Request, u store.User) (string, error) {
+	// One HttpOnly cookie name for the browser. A new login or signup
+	// replaces it. The previous token presented on this request is
+	// revoked so operator A's session cannot stay valid after operator
+	// B signs in on the same browser.
+	if prev := bearerOrCookie(r); prev != "" {
+		if err := s.Auth.DeleteSession(ctx, store.HashSessionToken(prev)); err != nil {
+			s.logger().Error("revoke previous session failed", "err", err)
+		}
+	}
 	raw, hash, err := store.NewSessionToken()
 	if err != nil {
 		return "", err

@@ -94,6 +94,15 @@ func (h Handler) Handle(ctx context.Context, job queue.Job) error {
 }
 
 func (h Handler) runPipeline(ctx context.Context, d store.Deployment, app store.Application) error {
+	started := time.Now()
+	stage := func(name string) {
+		// Stage names only — no env values, no git URLs with userinfo.
+		h.log().Info("deploy stage",
+			"deployment_id", d.ID,
+			"stage", name,
+			"elapsed_ms", time.Since(started).Milliseconds(),
+		)
+	}
 	work := filepath.Join(h.workspace(), d.ID)
 	// Remove the clone tree when we return so a failed detect cannot
 	// leave user source on disk indefinitely.
@@ -105,15 +114,18 @@ func (h Handler) runPipeline(ctx context.Context, d store.Deployment, app store.
 	// was copied from the source row by the API, not from the job JSON.
 	rollback := strings.TrimSpace(d.RollbackOf) != ""
 	if rollback {
+		stage("rollback")
 		if err := h.runRollback(ctx, &d); err != nil {
 			return err
 		}
 	} else {
+		stage("build")
 		if err := h.runBuild(ctx, &d, app, work); err != nil {
 			return err
 		}
 	}
 
+	stage("provision")
 	if err := h.setStatus(ctx, &d, store.StatusProvisioning, d.RuntimeKind, ""); err != nil {
 		return err
 	}
@@ -154,6 +166,7 @@ func (h Handler) runPipeline(ctx context.Context, d store.Deployment, app store.
 			return runtime.HealthGETPath(ctx, port, path, timeout)
 		}
 	}
+	stage("health")
 	if err := health(ctx, inst.HostPort, timeout); err != nil {
 		_ = h.Runner.Stop(ctx, container)
 		return h.fail(ctx, d, store.StatusHealthCheck, err)
@@ -180,7 +193,12 @@ func (h Handler) runPipeline(ctx context.Context, d store.Deployment, app store.
 	}
 
 	h.stopPrevious(ctx, d)
-	h.log().Info("deployment live", "id", d.ID, "kind", d.RuntimeKind, "port", d.HostPort)
+	h.log().Info("deployment live",
+		"id", d.ID,
+		"kind", d.RuntimeKind,
+		"port", d.HostPort,
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
 	return nil
 }
 

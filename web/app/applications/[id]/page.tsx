@@ -2,7 +2,7 @@
 
 /**
  * Application dashboard. Talks only to the Go API via /forge-api.
- * Polling (not websockets) is intentional until log streaming exists.
+ * Status/health poll; runtime logs use an authorized SSE follow.
  * Env hide is UX only — the API still returns plaintext.
  */
 import { FormEvent, useEffect, useState } from "react";
@@ -30,7 +30,7 @@ import {
   type Deployment,
   type EnvVar,
 } from "../../api";
-import { isInProgress, pillClass, statusLabel, STAGES, stepClass, when } from "../../status";
+import { formatDuration, isInProgress, pillClass, statusLabel, STAGES, stepClass, when } from "../../status";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -53,6 +53,7 @@ export default function ApplicationPage() {
   const [env, setEnv] = useState<EnvVar[]>([]);
   const [health, setHealth] = useState<AppHealth | null>(null);
   const [logs, setLogs] = useState("");
+  const [streamStatus, setStreamStatus] = useState<"off" | "live" | "error">("off");
   const [name, setName] = useState("");
   const [repo, setRepo] = useState("");
   const [rootDirectory, setRootDirectory] = useState(".");
@@ -123,29 +124,48 @@ export default function ApplicationPage() {
         } catch {
           /* health may be stopped */
         }
-        if (live && tab === "logs") {
-          try {
-            const got = await getApplicationLogs(id, 200);
-            setLogs(got.text || "(empty)");
-          } catch {
-            /* logs require a live deployment */
-          }
-        }
       })();
     }, 1500);
     return () => window.clearInterval(t);
-  }, [deployments, id, tab]);
+  }, [deployments, id]);
+
+  const liveId = deployments.find((d) => d.status === "live")?.id ?? "";
 
   useEffect(() => {
-    if (tab !== "logs") {
+    if (tab !== "logs" || !liveId) {
+      setStreamStatus("off");
       return;
     }
-    void getApplicationLogs(id, 200)
-      .then((got) => setLogs(got.text || "(empty)"))
-      .catch(() => {
-        /* no live deployment */
-      });
-  }, [tab, id]);
+    const es = new EventSource(`/forge-api/applications/${id}/logs/stream?tail=200`);
+    setStreamStatus("live");
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data) as { line?: string; error?: string };
+        if (data.error) {
+          setStreamStatus("error");
+          return;
+        }
+        const line = data.line;
+        if (line == null) {
+          return;
+        }
+        setLogs((cur) => {
+          const next = cur && cur !== "(empty)" ? `${cur}\n${line}` : line;
+          const lines = next.split("\n");
+          return lines.length > 2000 ? lines.slice(-2000).join("\n") : next;
+        });
+      } catch {
+        /* ignore a malformed event */
+      }
+    };
+    es.onerror = () => {
+      setStreamStatus("error");
+      es.close();
+    };
+    return () => {
+      es.close();
+    };
+  }, [tab, id, liveId]);
 
   async function onSave(e: FormEvent) {
     e.preventDefault();
@@ -522,7 +542,11 @@ export default function ApplicationPage() {
             </button>
           </div>
           <p className="hint" style={{ marginTop: "0.45rem", marginBottom: "0.75rem" }}>
-            Snapshot of the live process. Logs appear after a successful deploy.
+            {streamStatus === "live"
+              ? "Live stream of the running container. Refresh still takes a snapshot."
+              : streamStatus === "error"
+                ? "Stream ended. Use Refresh for a snapshot, or reopen this tab after the app is live."
+                : "Runtime logs appear after a successful deploy. A live app streams automatically."}
           </p>
           {logs ? <pre className="log-box">{logs}</pre> : <p className="empty">No logs yet.</p>}
         </div>
@@ -704,6 +728,8 @@ function DeploymentDetail({
       </div>
       <p className="deploy-meta">
         {when(d.created_at)}
+        {d.duration_ms ? ` · ${formatDuration(d.duration_ms)}` : ""}
+        {d.failed_stage ? ` · failed at ${d.failed_stage}` : ""}
         {d.rollback_of ? " · Rollback" : ""}
       </p>
       <div className="pipeline" aria-label="deployment stages">

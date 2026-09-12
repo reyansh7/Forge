@@ -31,6 +31,7 @@ export type Deployment = {
   build_log?: string;
   rollback_of?: string;
   local_host?: string;
+  duration_ms?: number;
   created_at: string;
   updated_at: string;
 };
@@ -71,10 +72,35 @@ function sessionToken(): string {
   return sessionStorage.getItem(TOKEN_KEY) || "";
 }
 
+function isAnonymousAuthPath(path: string): boolean {
+  return (
+    path.includes("/auth/login") ||
+    path.includes("/auth/signup") ||
+    path.includes("/auth/bootstrap") ||
+    path.includes("/auth/logout") ||
+    path.includes("/auth/status")
+  );
+}
+
+// dropBrowserSession clears the previous operator before a new login or
+// signup. The HttpOnly cookie is revoked via logout; sessionStorage
+// Bearer is dropped so it cannot keep the old user after Set-Cookie.
+async function dropBrowserSession(): Promise<void> {
+  clearSession();
+  try {
+    await fetch("/forge-api/auth/logout", { method: "POST", credentials: "include" });
+  } catch {
+    // The form must still submit if the API is briefly unreachable.
+  }
+}
+
 function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   const token = sessionToken();
-  if (token) {
+  // Do not attach a previous operator's Bearer to login/signup. The
+  // server prefers the session cookie when both are present; a stale
+  // header would still confuse curl-style clients that send only Bearer.
+  if (token && !isAnonymousAuthPath(path)) {
     headers.set("Authorization", `Bearer ${token}`);
   }
   return fetch(path, { ...init, headers, credentials: "include" });
@@ -115,7 +141,8 @@ export function authStatus(): Promise<{ bootstrap_required: boolean }> {
   return apiFetch("/forge-api/auth/status").then((r) => parse<{ bootstrap_required: boolean }>(r));
 }
 
-export function bootstrap(username: string, password: string): Promise<AuthSession> {
+export async function bootstrap(username: string, password: string): Promise<AuthSession> {
+  await dropBrowserSession();
   return apiFetch("/forge-api/auth/bootstrap", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -123,7 +150,17 @@ export function bootstrap(username: string, password: string): Promise<AuthSessi
   }).then((r) => parse<AuthSession>(r));
 }
 
-export function login(username: string, password: string): Promise<AuthSession> {
+export async function signup(username: string, password: string, password_confirm: string): Promise<AuthSession> {
+  await dropBrowserSession();
+  return apiFetch("/forge-api/auth/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password, password_confirm }),
+  }).then((r) => parse<AuthSession>(r));
+}
+
+export async function login(username: string, password: string): Promise<AuthSession> {
+  await dropBrowserSession();
   return apiFetch("/forge-api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -287,6 +324,22 @@ export function parseDotEnv(text: string): EnvVar[] {
     out.push({ key: trimmed.slice(0, eq).trim(), value: trimmed.slice(eq + 1) });
   }
   return out;
+}
+
+export type ObserveMetrics = {
+  http_requests_total: number;
+  http_errors_total: number;
+  deploys_queued_total: number;
+  deployments_total: number;
+  deployments_live: number;
+  deployments_failed: number;
+  last_deploy_duration_ms: number;
+  containers_running: number;
+  containers_checked: number;
+};
+
+export function getMetrics(): Promise<ObserveMetrics> {
+  return apiFetch("/forge-api/metrics").then((r) => parse<ObserveMetrics>(r));
 }
 
 export function getApplicationLogs(applicationId: string, tail = 100): Promise<AppLogs> {

@@ -40,6 +40,7 @@ type deploymentResponse struct {
 	BuildLog      string    `json:"build_log,omitempty"`
 	RollbackOf    string    `json:"rollback_of,omitempty"`
 	LocalHost     string    `json:"local_host,omitempty"`
+	DurationMS    int64     `json:"duration_ms"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
@@ -58,6 +59,7 @@ func deploymentResponseFrom(d store.Deployment) deploymentResponse {
 		BuildLog:      d.BuildLog,
 		RollbackOf:    d.RollbackOf,
 		LocalHost:     d.LocalHost,
+		DurationMS:    d.DurationMS(),
 		CreatedAt:     d.CreatedAt.UTC(),
 		UpdatedAt:     d.UpdatedAt.UTC(),
 	}
@@ -204,6 +206,7 @@ func (s *Server) enqueueQueued(w http.ResponseWriter, r *http.Request, ctx conte
 	if d.RollbackOf != "" {
 		action = "deployment.rollback"
 	}
+	s.Metrics.IncDeploysQueued()
 	s.audit(r, "", action, "deployment", d.ID, map[string]string{"application_id": d.ApplicationID})
 	writeJSON(w, http.StatusAccepted, createDeploymentResponse{
 		deploymentResponse: deploymentResponseFrom(d),

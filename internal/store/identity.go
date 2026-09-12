@@ -220,8 +220,8 @@ func (p *Postgres) CreateFirstUser(ctx context.Context, username, passwordHash s
 }
 
 // CreateUser inserts an operator without the bootstrap lock.
-// Tests (and a future invite flow) use this. Production HTTP in this
-// phase only calls CreateFirstUser.
+// POST /auth/signup uses this after the first user exists. Tests also
+// call it directly. Team invites remain a later phase.
 func (p *Postgres) CreateUser(ctx context.Context, username, passwordHash string) (User, error) {
 	return insertUser(ctx, p.db, username, passwordHash)
 }

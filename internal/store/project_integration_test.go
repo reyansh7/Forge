@@ -139,4 +139,15 @@ func TestProjectCreateGetListAgainstPostgres(t *testing.T) {
 	if _, err := pg.GetProject(ctx, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing id: %v", err)
 	}
+
+	other := operatorForTest(t, pg)
+	otherList, err := pg.ListProjects(ctx, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range otherList {
+		if p.ID == created.ID {
+			t.Fatal("another operator's ListProjects must not include this project")
+		}
+	}
 }

@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/reyansh7/Forge/internal/observe"
 )
 
 // StatusChecker reports whether a dependency is reachable.
@@ -50,6 +52,9 @@ type Server struct {
 	// Auth is unused by GET /health. Every other control-plane route
 	// requires a session. Tests inject memAuth; cmd/api injects Postgres.
 	Auth IdentityStore
+	// Metrics is process-local HTTP/enqueue counters (Phase 4).
+	// Deploy history still comes from PostgreSQL at GET /metrics time.
+	Metrics *observe.Metrics
 
 	loginGate *attemptGate
 }
@@ -71,14 +76,19 @@ func (s *Server) logger() *slog.Logger {
 // patterns; the mux picks the more specific one for /projects/<uuid>.
 //
 // Public: GET /health, GET /auth/status, POST /auth/bootstrap,
-// POST /auth/login, POST /auth/logout. Everything else needs a
+// POST /auth/signup, POST /auth/login, POST /auth/logout. Everything else needs a
 // session (Bearer or forge_session cookie). Auth == nil fails closed
 // (401), so a miswired API cannot revert to Phase 0's loopback-only gate.
+// GET /metrics and GET /applications/{id}/logs/stream require a session.
 func (s *Server) Handler() http.Handler {
+	if s.Metrics == nil {
+		s.Metrics = &observe.Metrics{}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /auth/status", s.authStatus)
 	mux.HandleFunc("POST /auth/bootstrap", s.bootstrap)
+	mux.HandleFunc("POST /auth/signup", s.signup)
 	mux.HandleFunc("POST /auth/login", s.login)
 	mux.HandleFunc("POST /auth/logout", s.logout)
 	mux.HandleFunc("GET /auth/me", s.me)
@@ -93,6 +103,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /applications/{id}/deployments", s.createApplicationDeployment)
 	mux.HandleFunc("GET /applications/{id}/deployments", s.listApplicationDeployments)
 	mux.HandleFunc("GET /applications/{id}/logs", s.getApplicationLogs)
+	mux.HandleFunc("GET /applications/{id}/logs/stream", s.streamApplicationLogs)
+	mux.HandleFunc("GET /metrics", s.getMetrics)
 	mux.HandleFunc("GET /applications/{id}/health", s.getApplicationHealth)
 	mux.HandleFunc("POST /applications/{id}/stop", s.stopApplication)
 	mux.HandleFunc("GET /applications/{id}/env", s.listEnv)
@@ -104,7 +116,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /deployments/{id}", s.getDeployment)
 	mux.HandleFunc("POST /deployments/{id}/rollback", s.rollbackDeployment)
 	mux.HandleFunc("POST /jobs", s.enqueueJob)
-	return s.withAuth(mux)
+	return stripDashboardPrefix(s.withObserve(s.withAuth(mux)))
+}
+
+// stripDashboardPrefix rewrites /forge-api/... to /... before auth and
+// routing. The Next.js dashboard calls /forge-api/*; if a rewrite
+// forwards that prefix to this process, the mux would 404 and withAuth
+// would 401 public auth routes.
+func stripDashboardPrefix(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		canon := canonicalAPIPath(r.URL.Path)
+		if canon == r.URL.Path {
+			next.ServeHTTP(w, r)
+			return
+		}
+		cp := r.Clone(r.Context())
+		cp.URL.Path = canon
+		next.ServeHTTP(w, cp)
+	})
 }
 
 // healthResponse is the JSON body. Field names are the public contract

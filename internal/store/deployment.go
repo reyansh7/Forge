@@ -67,6 +67,26 @@ type Deployment struct {
 	UpdatedAt     time.Time
 }
 
+// DurationMS is wall time from create to last status write.
+//
+// In-progress rows use now so the dashboard can show "how long this
+// attempt has been running" without a separate clock column. Terminal
+// rows use updated_at. This is Phase 4 observability, not billing.
+func (d Deployment) DurationMS() int64 {
+	if d.CreatedAt.IsZero() {
+		return 0
+	}
+	end := d.UpdatedAt
+	if d.Status.InProgress() || end.Before(d.CreatedAt) {
+		end = time.Now().UTC()
+	}
+	ms := end.Sub(d.CreatedAt).Milliseconds()
+	if ms < 0 {
+		return 0
+	}
+	return ms
+}
+
 const maxErrorMessageLen = 500
 
 // SanitizeErrorMessage trims and caps worker errors for storage.

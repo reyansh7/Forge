@@ -36,7 +36,7 @@ It does **not** mean copying Vercel, Railway, Render, Fly.io, Coolify, or Netlif
 
 ## 2. Current vs direction
 
-**Current (Phase 3, local):** one machine, loopback binds, operator sessions, Docker workloads with cap-drop, Caddy on `127.0.0.1:9080`, optional `{slug}.localhost` (not public DNS), explicit deployment state machine, HTTP health at go-live, log snapshots, env vars in Postgres, image-based rollback, audit events. No TLS. No public bind. No multi-tenant internet exposure.
+**Current (Phase 4, local):** one machine, loopback binds, operator sessions, Docker workloads with cap-drop, Caddy on `127.0.0.1:9080`, optional `{slug}.localhost` (not public DNS), explicit deployment state machine, HTTP health at go-live, log snapshots and SSE follow, `/metrics` + `/observe`, env vars in Postgres, image-based rollback, audit events. No TLS. No public bind. No tracing product. No multi-tenant internet exposure.
 
 **Direction:** the same control-plane / workload-plane split, evolved through roadmap phases into a system an operator can expose, observe, and operate with confidence.
 
@@ -98,7 +98,7 @@ Health checks stay a **gate to LIVE**, not a substitute for logs or metrics.
 
 Operators should answer: what happened, where, why, and what is happening now.
 
-Logs (including streaming), metrics, tracing, and alerts are **phased**. Snapshots and build logs exist now; websockets, metrics backends, and distributed traces do not.
+Logs (including streaming), metrics, tracing, and alerts are **phased**. Snapshots, SSE follow, structured API/worker logs, and session-gated `/metrics` exist now; alert routing and distributed traces do not.
 
 **Deployment intelligence** means using those signals to explain failures — still bounded by verification. **AI-assisted diagnostics** may later summarize logs; they must never become a path that executes model output on the host or inside the control plane.
 

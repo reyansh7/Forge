@@ -166,7 +166,7 @@ Initial responsibilities include:
 
 The dashboard communicates with the Go API rather than directly controlling infrastructure.
 
-**Current use (Phase 3):** `web/` is a Next.js App Router UI on `127.0.0.1:3000` with a black/red theme. `/login` bootstraps the first operator or signs in. Subsequent API calls send a bearer token (and credentials for the session cookie). It lists projects and applications the operator owns, manages env vars (including bulk replace), application settings (`root_directory`, `health_path`, `local_host`), queues deployments and rollbacks, polls status, shows `docker logs -t` snapshots and persisted `build_log`, and can stop a live app. Browser calls go to `/forge-api/*`, which Next.js rewrites to the Go API. The dashboard does not talk to Docker, Redis, or Caddy. Log streaming remains a Phase 4 roadmap item.
+**Current use (Phase 4):** `web/` is a Next.js App Router UI on `127.0.0.1:3000` with a black/red theme. `/login` asks for Sign in first (name + password). A link opens Sign up (name + password + confirm). Each login replaces the `forge_session` cookie and revokes the previous session so two operators do not share a live cookie in the same browser. Subsequent API calls send credentials (cookie) and, after login, a bearer token. It lists projects and applications the operator owns, manages env vars (including bulk replace), application settings (`root_directory`, `health_path`, `local_host`), queues deployments and rollbacks, polls status, streams runtime logs over SSE (snapshots remain), shows persisted `build_log` and `duration_ms`, and can stop a live app. `/observe` shows authorized metrics. Browser calls go to `/forge-api/*`, which Next.js rewrites to the Go API (the log stream has a dedicated App Router proxy so follow is not buffered). The dashboard does not talk to Docker, Redis, or Caddy. Tracing and alerts are later phases.
 
 ### 4.3 PostgreSQL
 
@@ -278,7 +278,7 @@ A deployed application should conceptually have:
 
 The runtime must not share unrestricted control-plane privileges.
 
-**Current use (Phase 3):** `docker run` publishes `127.0.0.1:{port}:8080` with memory/CPU/pids limits, `no-new-privileges`, `--cap-drop ALL`, a `tmpfs` `/tmp`, and `--pull never`. Operator env vars are passed as `-e KEY=VALUE` after key/value validation; `PORT=8080` is applied last so Forge owns the listen port. `PORT` and `FORGE_*` keys are rejected. No Docker socket mount, no `--privileged`. `docker build` does not use host network or the Docker socket; it can still pull public base images (supply-chain review is on the operator — scanners are not a substitute for isolation). The worker HTTP-probes `GET http://127.0.0.1:{port}{health_path}` once at go-live. After LIVE, dashboard `/applications/{id}/health` uses `docker inspect` (container running) so polling does not flood the app's access logs. Runtime logs are a `docker logs -t --tail` snapshot (not a websocket stream; that is a Phase 4 roadmap item). Build output is on the deployment row. Disk quotas, tenant network policies, and autoscaling are not current.
+**Current use (Phase 4):** `docker run` publishes `127.0.0.1:{port}:8080` with memory/CPU/pids limits, `no-new-privileges`, `--cap-drop ALL`, a `tmpfs` `/tmp`, and `--pull never`. Operator env vars are passed as `-e KEY=VALUE` after key/value validation; `PORT=8080` is applied last so Forge owns the listen port. `PORT` and `FORGE_*` keys are rejected. No Docker socket mount, no `--privileged`. `docker build` does not use host network or the Docker socket; it can still pull public base images (supply-chain review is on the operator — scanners are not a substitute for isolation). The worker HTTP-probes `GET http://127.0.0.1:{port}{health_path}` once at go-live. After LIVE, dashboard `/applications/{id}/health` uses `docker inspect` (container running) so polling does not flood the app's access logs. Runtime logs are a `docker logs -t --tail` snapshot plus an authorized SSE follow (`docker logs -f`). Build output is on the deployment row. Disk quotas, tenant network policies, and autoscaling are not current.
 
 ### 4.8 Reverse Proxy
 
@@ -397,7 +397,7 @@ Important principles:
 
 Postgres env vars are **not** a secret manager.
 
-**Authentication and authorization** — every control-plane operation that affects resources must be authorized. **Current:** loopback bind plus operator sessions (`POST /auth/bootstrap` once, then `POST /auth/login`). Mutating and data-leaking routes require a valid session. Projects are scoped by `owner_id`; another operator's UUID is 404, not 200. `GET /health` stays public for Compose/process checks. The API is still bound to `127.0.0.1` — auth is not permission to publish on `0.0.0.0`. Team RBAC is a later phase.
+**Authentication and authorization** — every control-plane operation that affects resources must be authorized. **Current:** loopback bind plus operator sessions (`POST /auth/bootstrap` or `POST /auth/signup`, then `POST /auth/login`). A new session replaces the `forge_session` cookie and revokes the previous token from that browser. Mutating and data-leaking routes require a valid session. Projects are scoped by `owner_id`; another operator's UUID is 404, not 200. `GET /health` stays public for Compose/process checks. The API is still bound to `127.0.0.1` — auth is not permission to publish on `0.0.0.0`. Team RBAC is a later phase.
 
 **Auditability** — security-sensitive control-plane actions write `audit_events` (bootstrap, login, project/app/env/deploy/stop/rollback). Metadata must not include env values, passwords, or session tokens.
 
@@ -576,7 +576,7 @@ Future phases must extend these **roles**, not collapse them into a vendor SDK.
 
 **Rollback / recovery** — current: reuse `image_name`. Future: backups (Phase 5), node failover (Phase 6+), multi-region DR (Phase 10).
 
-**Observability** — snapshots now; streaming/metrics/tracing later. Telemetry must not become a secret leak.
+**Observability** — structured control-plane logs, authorized SSE runtime follow, and session-gated `/metrics`. Tracing and alerts are later. Telemetry must not become a secret leak.
 
 **High availability and disaster recovery** — design so Postgres remains source of truth and queue loss is survivable (jobs may drop today; that is documented). HA is not current.
 

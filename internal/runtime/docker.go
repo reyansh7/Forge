@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -206,6 +208,73 @@ func (HostDocker) Logs(ctx context.Context, containerName string, tail int) (str
 		text = text[len(text)-64*1024:]
 	}
 	return text, nil
+}
+
+// dockerLogsFollowArgs is `docker logs -f` for the SSE stream.
+//
+// -f follows until the context is cancelled. The API owns the deadline
+// (client disconnect or a max stream time). -- is the name boundary so
+// a crafted container name cannot become another docker flag.
+func dockerLogsFollowArgs(containerName string, tail int) ([]string, error) {
+	if err := validateContainerName(containerName); err != nil {
+		return nil, err
+	}
+	if tail < 1 {
+		tail = 100
+	}
+	if tail > 500 {
+		tail = 500
+	}
+	return []string{"logs", "-f", "-t", "--tail", strconv.Itoa(tail), "--", containerName}, nil
+}
+
+// FollowLogs streams `docker logs -f` lines to write until ctx ends.
+//
+// This is the Phase 4 live-tail. It is still an operator control-plane
+// read, not a privileged host agent. write must not block forever —
+// a stuck SSE client should cancel ctx. Lines are not redacted: they
+// are whatever the workload printed. Authorization happens in HTTP.
+func (HostDocker) FollowLogs(ctx context.Context, containerName string, tail int, write func(line string) error) error {
+	args, err := dockerLogsFollowArgs(containerName, tail)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	if err := cmd.Start(); err != nil {
+		_ = pw.Close()
+		return fmt.Errorf("docker logs follow: %w", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+		_ = pw.Close()
+	}()
+
+	scanner := bufio.NewScanner(pr)
+	// App log lines can be large; the default 64KiB token is tight.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+		if err := write(scanner.Text()); err != nil {
+			return err
+		}
+	}
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("docker logs follow read: %w", err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	return nil
 }
 
 func prepareDockerfile(dir, kind string) error {

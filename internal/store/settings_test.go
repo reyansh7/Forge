@@ -3,6 +3,7 @@ package store
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateRootDirectory(t *testing.T) {
@@ -52,6 +53,17 @@ func TestValidateLocalHost(t *testing.T) {
 	empty, err := ValidateLocalHost("  ")
 	if err != nil || empty != "" {
 		t.Fatalf("empty slug got %q err=%v", empty, err)
+	}
+}
+
+func TestDeploymentDurationMS(t *testing.T) {
+	d := Deployment{
+		Status:    StatusFailed,
+		CreatedAt: time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 9, 12, 12, 0, 3, 0, time.UTC),
+	}
+	if d.DurationMS() != 3000 {
+		t.Fatalf("duration = %d", d.DurationMS())
 	}
 }
 

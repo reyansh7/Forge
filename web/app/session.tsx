@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { clearSession, logout, me } from "./api";
 
@@ -34,6 +35,9 @@ export function SessionBar() {
 
   return (
     <div className="session-bar">
+      <Link href="/observe" className="session-name">
+        Observe
+      </Link>
       <span className="session-name">{name}</span>
       <button className="btn-ghost" type="button" onClick={() => void onLogout()}>
         Log out

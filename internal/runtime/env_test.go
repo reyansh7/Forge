@@ -27,6 +27,23 @@ func TestContainerNameStripsHyphens(t *testing.T) {
 	}
 }
 
+func TestDockerLogsFollowArgs(t *testing.T) {
+	args, err := dockerLogsFollowArgs("forge-run-abc", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-f") || !strings.Contains(joined, "--tail") {
+		t.Fatalf("follow args: %q", joined)
+	}
+	if args[len(args)-1] != "forge-run-abc" || args[len(args)-2] != "--" {
+		t.Fatalf("name boundary: %#v", args)
+	}
+	if _, err := dockerLogsFollowArgs("not a name", 10); err == nil {
+		t.Fatal("expected invalid container name")
+	}
+}
+
 func TestDockerRunArgsDropCapabilities(t *testing.T) {
 	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil)
 	if err != nil {

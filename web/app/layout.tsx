@@ -1,19 +1,9 @@
 import type { Metadata } from "next";
-import { Fraunces, Outfit, IBM_Plex_Mono } from "next/font/google";
+import { IBM_Plex_Mono } from "next/font/google";
 import Link from "next/link";
 import "./globals.css";
 import { HealthDot } from "./health";
 import { SessionBar } from "./session";
-
-const display = Fraunces({
-  subsets: ["latin"],
-  variable: "--font-display",
-});
-
-const sans = Outfit({
-  subsets: ["latin"],
-  variable: "--font-sans",
-});
 
 const mono = IBM_Plex_Mono({
   subsets: ["latin"],
@@ -28,8 +18,8 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${display.variable} ${sans.variable} ${mono.variable}`}>
-      <body style={{ fontFamily: "var(--font-sans), system-ui, sans-serif" }}>
+    <html lang="en" className={mono.variable}>
+      <body>
         <div className="shell">
           <header className="topbar">
             <Link href="/" className="brand">

@@ -37,6 +37,7 @@ type ApplicationStore interface {
 // control-plane actions, not untrusted source execution. Tests inject a stub.
 type AppRuntime interface {
 	Logs(ctx context.Context, containerName string, tail int) (string, error)
+	FollowLogs(ctx context.Context, containerName string, tail int, write func(line string) error) error
 	Stop(ctx context.Context, containerName string) error
 	Running(ctx context.Context, containerName string) (bool, error)
 }

@@ -166,6 +166,14 @@ type stubRuntime struct {
 }
 
 func (s *stubRuntime) Logs(context.Context, string, int) (string, error) { return s.logs, nil }
+func (s *stubRuntime) FollowLogs(ctx context.Context, _ string, _ int, write func(string) error) error {
+	if s.logs != "" {
+		if err := write(strings.TrimRight(s.logs, "\n")); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
 func (s *stubRuntime) Stop(_ context.Context, name string) error {
 	s.stopped = append(s.stopped, name)
 	return nil

@@ -38,9 +38,9 @@ Future-phase work must not be implemented merely because it is known to be requi
 
 | Kind | Phases | Meaning |
 |------|--------|---------|
-| **CURRENT** | 0, 1, 2, 3 | Implemented. Local loopback PaaS with operator auth. |
-| **NEXT** | 4 | Next authorized work only after `START PHASE 4`. |
-| **FUTURE** | 5–10 | Documented sequence. Not authorized. |
+| **CURRENT** | 0, 1, 2, 3, 4 | Implemented. Local loopback PaaS with operator auth and observability. |
+| **NEXT** | 5 | Next authorized work only after `START PHASE 5`. |
+| **FUTURE** | 6–10 | Documented sequence. Not authorized. |
 
 Security requirements apply in every phase. Phases 3 and 5 add **depth**; they do not mark the start of security.
 
@@ -51,8 +51,8 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 1 Core PaaS                 COMPLETE
 2 Developer experience      COMPLETE
 3 Security hardening        COMPLETE
-4 Observability             NEXT
-5 Production hardening      (single node: TLS, quotas, backup, rate limits)
+4 Observability             COMPLETE
+5 Production hardening      NEXT (single node: TLS, quotas, backup, rate limits)
 6 Multi-node infrastructure
 7 Advanced platform
 8 Cloud / AWS readiness
@@ -62,7 +62,7 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 
 **Reasoning:** do not distribute or publicly expose an unauthenticated, weakly observed control plane. Authentication and deeper isolation (Phase 3) come before leaving loopback. Observability (Phase 4) comes before calling the system production. Production hardening (Phase 5) stays **single-node** so TLS, backups, and quotas exist before a second worker. Multi-node (Phase 6) waits until one node is trustworthy. Advanced PaaS features (Phase 7) wait until operation is honest. AWS (Phase 8) maps existing roles; it is not a rewrite. HA and multi-region come last.
 
-This **reorders unimplemented work**. Former “Phase 5 multi-node before Phase 6 production hardening” is rejected as less safe. Completed Phases 0–3 keep their numbers and status.
+This **reorders unimplemented work**. Former “Phase 5 multi-node before Phase 6 production hardening” is rejected as less safe. Completed Phases 0–4 keep their numbers and status.
 
 Phase 2 already ships **image rollback**. Later phases may add traffic-shifting strategies; they must not describe rollback as unimplemented.
 
@@ -188,13 +188,14 @@ Deepen isolation and introduce **control-plane identity**. Security already appl
 
 **3.a Control-plane authentication and authorization**
 
-- First operator via `POST /auth/bootstrap` (empty `users` table only)
+- First operator via `POST /auth/bootstrap` (empty `users` table only) or `POST /auth/signup`
+- `POST /auth/signup` (name + password + password_confirm) creates another operator with their own `owner_id`
 - `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `GET /auth/status`
 - bcrypt password hashes; sessions store SHA-256 of the token, not the token
-- Bearer `Authorization` and `forge_session` cookie
-- All control-plane routes except `/health`, `/auth/status`, `/auth/bootstrap`, `/auth/login`, `/auth/logout` require a session
+- Bearer `Authorization` and `forge_session` cookie. A new login/signup replaces the cookie and revokes the previous session presented by that browser. Cookie wins if both are present.
+- All control-plane routes except `/health`, `/auth/status`, `/auth/bootstrap`, `/auth/signup`, `/auth/login`, `/auth/logout` require a session
 - Projects have `owner_id`. A UUID in the path is not proof of access (wrong owner → 404)
-- Dashboard `/login` after the API enforces the same rules
+- Dashboard `/login` asks for Sign in first; a “create an account” link opens Sign up (name + password + confirm)
 
 **3.b Workload and build isolation**
 
@@ -223,37 +224,39 @@ Loopback binds unchanged. Caddy was **not** published on `0.0.0.0`.
 
 ### Intentionally deferred
 
-TLS, public bind, secret manager, team RBAC, log streaming, AWS. Say `START PHASE 4` for observability.
+TLS, public bind, secret manager, team RBAC, AWS. Observability is Phase 4 (done). Say `START PHASE 5` for production hardening.
 
 ---
 
 ## 7. Phase 4 — Observability
 
-**Status: FUTURE.** Do not implement until `START PHASE 4`.
+**Status: COMPLETE** (authorized `implement phase 4`).
 
 ### Objective
 
 Make failures and live behavior diagnosable without SSH folklore.
 
-### Prerequisites
+### What shipped
 
-Phase 3 complete enough that telemetry cannot become an unauthenticated data leak of other tenants’ logs.
+- Structured JSON `slog` on API (`http` lines: request_id, method, path without query, status, duration_ms) and worker (`deploy stage`, `job finished`, `deployment live` with elapsed_ms). No request bodies, cookies, Authorization, or env values.
+- Runtime log streaming: `GET /applications/{id}/logs/stream` (SSE, `docker logs -f`). Snapshot `GET /applications/{id}/logs` remains. Same owner check as other app routes (wrong owner → 404).
+- Metrics: `GET /metrics` (session required). Process HTTP counters plus this operator’s deploy totals, last deploy duration, and `docker inspect` running count for their LIVE rows.
+- Dashboard `/observe` and live Logs tab (EventSource). Deployment rows expose `duration_ms` and `failed_stage`.
+- No tracing. No alerts. No Prometheus/Grafana sidecar. No privileged host agent.
 
-### Capabilities (increments)
+### Security requirements (held)
 
-- Structured control-plane logs
-- Runtime log streaming (replacing snapshot-only UX as an *addition*, snapshots may remain)
-- Metrics for API, worker, deploy durations, container health
-- Tracing later, not in the first observability increment
-- Alerts only after metrics have an owner and a destination
-
-### Security requirements
-
-Logs and traces must not include secrets. Streaming endpoints are authorized. Do not ship telemetry sidecars that run as privileged host agents without review.
+Streaming and `/metrics` are not public. Telemetry must not include secrets. Loopback binds unchanged.
 
 ### Verification / exit criteria
 
-An operator can answer what happened, where it failed, and what is happening now for a failed and a live deploy, using Forge interfaces — not only Docker Desktop.
+- Unauthenticated `/metrics` and `/logs/stream` return 401
+- Another operator’s stream is 404
+- Operator can see failed stage + duration on a deployment and live-tail a LIVE app from the dashboard
+
+### Intentionally deferred
+
+Distributed tracing, alert routing, log retention quotas (Phase 5), AI summaries (Phase 10).
 
 ---
 
@@ -483,7 +486,9 @@ Before moving forward:
 
 **Phase 3 — COMPLETE** (authorized `START PHASE 3`)
 
-**Phase 4 — FUTURE.** Do not start until the developer says `START PHASE 4`.
+**Phase 4 — COMPLETE** (authorized `implement phase 4`)
+
+**Phase 5 — FUTURE.** Do not start until the developer says `START PHASE 5`.
 
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
@@ -498,6 +503,8 @@ Phase 1 (done): `applications` + `application_env_vars`; deployments belong to a
 Phase 2 (done): application settings (`root_directory`, `health_path`, `local_host`); persisted `build_log` / `image_name`; rollback from a prior image; bulk env replace; dashboard history.
 
 Phase 3 (done): operator bootstrap/login; project `owner_id`; session cookies/bearer; audit log; login rate limit; tighter `docker run` isolation (`--cap-drop ALL`, tmpfs, `--pull never`). Still loopback. Not TLS, not public bind, not a secret vault, not AWS.
+
+Phase 4 (done): structured API/worker logs; authorized SSE log follow; `/metrics` + `/observe`; deploy `duration_ms`. Not tracing, not alerts, not TLS.
 
 ---
 

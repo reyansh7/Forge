@@ -96,6 +96,61 @@ func TestBootstrapThenMe(t *testing.T) {
 	}
 }
 
+func TestSignupRejectsMismatchedPasswords(t *testing.T) {
+	srv := &Server{Postgres: stubPing{}, Redis: stubPing{}, Auth: newMemAuth()}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/signup", bytes.NewReader(
+		[]byte(`{"username":"newbie","password":"long-enough-password","password_confirm":"different-password"}`),
+	))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSignupThroughDashboardPrefixIsPublic(t *testing.T) {
+	// The browser posts /forge-api/auth/signup. That must not require a
+	// session even if the rewrite leaves the prefix on the request.
+	srv := &Server{Postgres: stubPing{}, Redis: stubPing{}, Auth: newMemAuth()}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/forge-api/auth/signup", bytes.NewReader(
+		[]byte(`{"username":"newbie","password":"long-enough-password","password_confirm":"long-enough-password"}`),
+	))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSignupCreatesAccountAndSession(t *testing.T) {
+	auth := newMemAuth()
+	srv := &Server{Postgres: stubPing{}, Redis: stubPing{}, Auth: auth}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/signup", bytes.NewReader(
+		[]byte(`{"username":"newbie","password":"long-enough-password","password_confirm":"long-enough-password"}`),
+	))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var sess authSessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&sess); err != nil {
+		t.Fatal(err)
+	}
+	if sess.User.Username != "newbie" || sess.Token == "" {
+		t.Fatalf("%+v", sess)
+	}
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/auth/signup", bytes.NewReader(
+		[]byte(`{"username":"newbie","password":"long-enough-password","password_confirm":"long-enough-password"}`),
+	))
+	srv.Handler().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("duplicate = %d", rec2.Code)
+	}
+}
+
 func TestLoginRejectsBadPassword(t *testing.T) {
 	auth := newMemAuth()
 	hash, err := store.HashPassword("long-enough-password")
@@ -151,6 +206,166 @@ func TestOtherOperatorCannotReadProject(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Fatalf("other operator listed %#v", list)
+	}
+}
+
+func TestEachOperatorOnlySeesOwnCreatedProjects(t *testing.T) {
+	// Invariant: a project created while logged in as A is stored on A's
+	// account (owner_id = A's user id). B's GET /projects must not
+	// include it, and A's list must not include a project B created.
+	mem := newMemProjects()
+	srv := projectServer(mem)
+
+	recA := httptest.NewRecorder()
+	reqA := httptest.NewRequest(http.MethodPost, "/projects", bytes.NewReader(
+		[]byte(`{"name":"alpha","repository_url":"forge://hello"}`),
+	))
+	testHandler(srv).ServeHTTP(recA, reqA)
+	if recA.Code != http.StatusCreated {
+		t.Fatalf("A create = %d body=%s", recA.Code, recA.Body.String())
+	}
+	var aProject projectResponse
+	if err := json.NewDecoder(recA.Body).Decode(&aProject); err != nil {
+		t.Fatal(err)
+	}
+
+	recB := serveOther(srv, httptest.NewRequest(http.MethodPost, "/projects", bytes.NewReader(
+		[]byte(`{"name":"beta","repository_url":"forge://hello"}`),
+	)))
+	if recB.Code != http.StatusCreated {
+		t.Fatalf("B create = %d body=%s", recB.Code, recB.Body.String())
+	}
+	var bProject projectResponse
+	if err := json.NewDecoder(recB.Body).Decode(&bProject); err != nil {
+		t.Fatal(err)
+	}
+	if aProject.ID == bProject.ID {
+		t.Fatal("operators must not share a project id")
+	}
+
+	recAList := httptest.NewRecorder()
+	reqAList := httptest.NewRequest(http.MethodGet, "/projects", nil)
+	testHandler(srv).ServeHTTP(recAList, reqAList)
+	var aList []projectResponse
+	if err := json.NewDecoder(recAList.Body).Decode(&aList); err != nil {
+		t.Fatal(err)
+	}
+	if !projectIDsEqual(aList, []string{aProject.ID}) {
+		t.Fatalf("A list = %#v, want only %s", aList, aProject.ID)
+	}
+
+	recBList := serveOther(srv, httptest.NewRequest(http.MethodGet, "/projects", nil))
+	var bList []projectResponse
+	if err := json.NewDecoder(recBList.Body).Decode(&bList); err != nil {
+		t.Fatal(err)
+	}
+	if !projectIDsEqual(bList, []string{bProject.ID}) {
+		t.Fatalf("B list = %#v, want only %s", bList, bProject.ID)
+	}
+
+	stored, err := mem.GetProject(nil, aProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.OwnerID != testUserID {
+		t.Fatalf("A project owner = %q, want session user", stored.OwnerID)
+	}
+	storedB, err := mem.GetProject(nil, bProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedB.OwnerID != testOtherUserID {
+		t.Fatalf("B project owner = %q, want other session user", storedB.OwnerID)
+	}
+}
+
+func projectIDsEqual(got []projectResponse, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, p := range got {
+		seen[p.ID] = true
+	}
+	for _, id := range want {
+		if !seen[id] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestLoginRevokesPreviousSession(t *testing.T) {
+	// Safety: signing in again on the same browser must kill the
+	// previous cookie/token so a later request cannot still act as
+	// the last operator.
+	auth := newMemAuth()
+	srv := &Server{Postgres: stubPing{}, Redis: stubPing{}, Auth: auth}
+	signupBody := []byte(`{"username":"newbie","password":"long-enough-password","password_confirm":"long-enough-password"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/signup", bytes.NewReader(signupBody))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("signup = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var first authSessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(
+		[]byte(`{"username":"newbie","password":"long-enough-password"}`),
+	))
+	req2.AddCookie(&http.Cookie{Name: sessionCookieName, Value: first.Token})
+	srv.Handler().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("login = %d body=%s", rec2.Code, rec2.Body.String())
+	}
+	var second authSessionResponse
+	if err := json.NewDecoder(rec2.Body).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Token == "" || second.Token == first.Token {
+		t.Fatalf("expected a new session, got %+v", second)
+	}
+
+	rec3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	req3.Header.Set("Authorization", "Bearer "+first.Token)
+	srv.Handler().ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusUnauthorized {
+		t.Fatalf("old token status = %d, want 401", rec3.Code)
+	}
+
+	rec4 := httptest.NewRecorder()
+	req4 := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	req4.Header.Set("Authorization", "Bearer "+second.Token)
+	srv.Handler().ServeHTTP(rec4, req4)
+	if rec4.Code != http.StatusOK {
+		t.Fatalf("new token status = %d body=%s", rec4.Code, rec4.Body.String())
+	}
+}
+
+func TestSessionCookieWinsOverStaleBearer(t *testing.T) {
+	// The dashboard used to send a leftover Bearer after a new cookie
+	// was set. Cookie must win so the browser is the operator who
+	// just signed in, not the previous one.
+	srv := withAuth(&Server{Postgres: stubPing{}, Redis: stubPing{}})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	req.Header.Set("Authorization", "Bearer "+testSessionToken)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: testOtherToken})
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var me authUserResponse
+	if err := json.NewDecoder(rec.Body).Decode(&me); err != nil {
+		t.Fatal(err)
+	}
+	if me.Username != "other" {
+		t.Fatalf("me = %+v, want cookie user other", me)
 	}
 }
 

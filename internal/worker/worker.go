@@ -82,7 +82,17 @@ func Run(ctx context.Context, q queue.JobQueue, h Handler, log *slog.Logger) err
 			continue
 		}
 
-		if err := h.Handle(ctx, job); err != nil {
+		// Do not log Payload. Deploy JSON is an id; future types might
+		// accidentally include an env value.
+		started := time.Now()
+		err = h.Handle(ctx, job)
+		log.Info("job finished",
+			"id", job.ID,
+			"type", job.Type,
+			"duration_ms", time.Since(started).Milliseconds(),
+			"ok", err == nil,
+		)
+		if err != nil {
 			log.Error("job handler failed", "id", job.ID, "type", job.Type, "err", err)
 			continue
 		}
