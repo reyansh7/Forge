@@ -22,6 +22,7 @@ var (
 	ErrNotFound  = errors.New("not found")
 	ErrInvalidID = errors.New("invalid id")
 	ErrConflict  = errors.New("conflict")
+	ErrQuota     = errors.New("quota exceeded")
 )
 
 // DefaultApplicationName is the application created with each project so
@@ -318,4 +319,18 @@ func (p *Postgres) ListProjects(ctx context.Context, ownerID string) ([]Project,
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
 	return out, nil
+}
+
+// CountProjectsByOwner is the Phase 5 project quota.
+func (p *Postgres) CountProjectsByOwner(ctx context.Context, ownerID string) (int, error) {
+	ownerID, err := ParseUUID(ownerID)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = p.db.QueryRowContext(ctx, `SELECT count(*) FROM projects WHERE owner_id = $1::uuid`, ownerID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count projects: %w", err)
+	}
+	return n, nil
 }

@@ -23,6 +23,7 @@ type ProjectStore interface {
 	CreateProject(ctx context.Context, ownerID string, in store.ProjectInput) (store.Project, error)
 	GetProject(ctx context.Context, id string) (store.Project, error)
 	ListProjects(ctx context.Context, ownerID string) ([]store.Project, error)
+	CountProjectsByOwner(ctx context.Context, ownerID string) (int, error)
 }
 
 // createProjectRequest is the JSON the client sends. json tags are the
@@ -81,6 +82,19 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
+
+	if max := s.projectQuota(); max > 0 {
+		n, err := s.Projects.CountProjectsByOwner(ctx, actor.UserID)
+		if err != nil {
+			s.logger().Error("count projects failed", "err", err)
+			writeError(w, http.StatusInternalServerError, "failed to create project")
+			return
+		}
+		if n >= max {
+			writeError(w, http.StatusConflict, "project quota exceeded")
+			return
+		}
+	}
 
 	p, err := s.Projects.CreateProject(ctx, actor.UserID, in)
 	if err != nil {

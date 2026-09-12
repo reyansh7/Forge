@@ -114,6 +114,66 @@ func ValidateLocalHost(raw string) (string, error) {
 	return s, nil
 }
 
+// SuggestedLocalHost is the Host slug Forge uses when the operator
+// left local_host empty.
+//
+// A slug is not required to deploy. Path URLs (/d/{id}/) still exist,
+// but SPAs that request /assets/* from the origin root only work
+// reliably on a Host mounted at /. Default application name "app"
+// becomes app-{short-id} so two unnamed apps do not share app.localhost.
+func SuggestedLocalHost(name, applicationID string) string {
+	slug := slugifyLocalHost(name)
+	short := shortHostLabel(applicationID)
+	if slug == "" || slug == "app" {
+		slug = "app-" + short
+	}
+	if _, reserved := reservedLocalHosts[slug]; reserved {
+		slug = slug + "-" + short
+	}
+	got, err := ValidateLocalHost(slug)
+	if err != nil || got == "" {
+		return "app-" + short
+	}
+	return got
+}
+
+func slugifyLocalHost(name string) string {
+	var b strings.Builder
+	lastDash := true
+	n := 0
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+			n++
+		default:
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+				n++
+			}
+		}
+		if n >= 40 {
+			break
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func shortHostLabel(id string) string {
+	hex := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(id), "-", ""))
+	if len(hex) < 4 {
+		return "0000"
+	}
+	for _, r := range hex[:4] {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "0000"
+		}
+	}
+	return hex[:4]
+}
+
 // ValidateApplication is name + git URL + Phase 2 settings in one pass.
 // Create/Update call this so a worker cannot insert a row the HTTP layer
 // would have rejected.

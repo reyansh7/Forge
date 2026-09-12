@@ -10,8 +10,8 @@ import (
 //
 // What: rate / abuse control for login and bootstrap. Those endpoints
 // are unauthenticated, so a script on loopback can still hammer bcrypt.
-// Why: Phase 3.c. Not a substitute for TLS or a global API quota
-// (those are later). How: keep timestamps; allow if fewer than `max`
+// Why: Phase 3.c login/bootstrap, Phase 5 deploy attempts.
+// How: keep timestamps; allow if fewer than `max`
 // fall inside `window`.
 //
 // This is in-memory. Restart clears it. Two API processes do not share

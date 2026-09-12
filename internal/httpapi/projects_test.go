@@ -54,6 +54,18 @@ func (m *memProjects) GetProject(_ context.Context, id string) (store.Project, e
 	return p, nil
 }
 
+func (m *memProjects) CountProjectsByOwner(_ context.Context, ownerID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, p := range m.byID {
+		if p.OwnerID == ownerID {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *memProjects) ListProjects(_ context.Context, ownerID string) ([]store.Project, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -184,6 +196,25 @@ func TestGetProjectOK(t *testing.T) {
 	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateProjectQuotaExceeded(t *testing.T) {
+	// Phase 5: MaxProjectsPerOwner is operator config, not a client field.
+	srv := projectServer(newMemProjects())
+	srv.Limits.MaxProjectsPerOwner = 1
+	body := []byte(`{"name":"one","repository_url":"https://github.com/example/app.git"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/projects", bytes.NewReader(body))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first create status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/projects", bytes.NewReader([]byte(`{"name":"two","repository_url":"https://github.com/example/app.git"}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("quota status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -418,9 +418,7 @@ func (s *Server) issueSession(ctx context.Context, w http.ResponseWriter, r *htt
 		MaxAge:   int(7 * 24 * time.Hour / time.Second),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		// Secure is false: the control plane is HTTP on loopback.
-		// Phase 5 TLS must flip this when the API is served over https.
-		Secure: false,
+		Secure:   s.SecureCookies,
 	})
 	return raw, nil
 }

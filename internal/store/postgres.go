@@ -14,6 +14,8 @@ import (
 	// does not depend on driver-specific types. Swapping drivers later is
 	// easier. The cost is a slightly less pgx-idiomatic API.
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/reyansh7/Forge/internal/secrets"
 )
 
 // Postgres is the control-plane PostgreSQL client.
@@ -36,9 +38,16 @@ import (
 // must not exec user git/build commands.
 //
 // Deferred: connection pooling for many API replicas, read replicas,
-// per-user databases, encryption at rest.
+// per-user databases. Env values are sealed when Crypter is set.
 type Postgres struct {
-	db *sql.DB
+	db      *sql.DB
+	crypter *secrets.Box
+}
+
+// SetCrypter installs the Phase 5 env-at-rest box. The API and worker
+// must share the same key. A nil box leaves values as stored.
+func (p *Postgres) SetCrypter(b *secrets.Box) {
+	p.crypter = b
 }
 
 // NewPostgres opens a pool and proves the server accepts connections.

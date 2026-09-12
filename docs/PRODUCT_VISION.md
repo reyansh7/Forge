@@ -36,7 +36,7 @@ It does **not** mean copying Vercel, Railway, Render, Fly.io, Coolify, or Netlif
 
 ## 2. Current vs direction
 
-**Current (Phase 4, local):** one machine, loopback binds, operator sessions, Docker workloads with cap-drop, Caddy on `127.0.0.1:9080`, optional `{slug}.localhost` (not public DNS), explicit deployment state machine, HTTP health at go-live, log snapshots and SSE follow, `/metrics` + `/observe`, env vars in Postgres, image-based rollback, audit events. No TLS. No public bind. No tracing product. No multi-tenant internet exposure.
+**Current (Phase 5, local):** one machine, loopback binds (world-bind only with `FORGE_ALLOW_PUBLIC_BIND=1`), operator sessions, Docker workloads with cap-drop, Caddy HTTP `127.0.0.1:9080` and HTTPS `127.0.0.1:9443` (`tls internal`), optional `{slug}.localhost` (not public DNS), explicit deployment state machine, HTTP health at go-live, log snapshots and SSE follow, `/metrics` + `/observe`, env vars sealed at rest, image-based rollback, Postgres backup/restore, project/deploy/workspace quotas. Opt-in API TLS. No ACME. No tracing product. No multi-tenant internet exposure.
 
 **Direction:** the same control-plane / workload-plane split, evolved through roadmap phases into a system an operator can expose, observe, and operate with confidence.
 

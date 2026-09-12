@@ -55,8 +55,27 @@ type Server struct {
 	// Metrics is process-local HTTP/enqueue counters (Phase 4).
 	// Deploy history still comes from PostgreSQL at GET /metrics time.
 	Metrics *observe.Metrics
+	// Limits is Phase 5 operator quotas. Zero fields use defaults.
+	Limits Limits
+	// SecureCookies is set when the API serves TLS so forge_session
+	// is not sent on plaintext HTTP.
+	SecureCookies bool
+	// Schemas lists applied migration filenames for GET /operator/status.
+	Schemas SchemaLister
 
-	loginGate *attemptGate
+	loginGate  *attemptGate
+	deployGate *attemptGate
+}
+
+// Limits are per-operator resource caps (Phase 5).
+type Limits struct {
+	MaxProjectsPerOwner int
+	MaxInflightDeploys  int
+}
+
+// SchemaLister is the HTTP → schema_migrations boundary.
+type SchemaLister interface {
+	SchemaVersions(ctx context.Context) ([]string, error)
 }
 
 func (s *Server) logger() *slog.Logger {
@@ -79,7 +98,7 @@ func (s *Server) logger() *slog.Logger {
 // POST /auth/signup, POST /auth/login, POST /auth/logout. Everything else needs a
 // session (Bearer or forge_session cookie). Auth == nil fails closed
 // (401), so a miswired API cannot revert to Phase 0's loopback-only gate.
-// GET /metrics and GET /applications/{id}/logs/stream require a session.
+// GET /metrics, GET /operator/status, and GET /applications/{id}/logs/stream require a session.
 func (s *Server) Handler() http.Handler {
 	if s.Metrics == nil {
 		s.Metrics = &observe.Metrics{}
@@ -105,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /applications/{id}/logs", s.getApplicationLogs)
 	mux.HandleFunc("GET /applications/{id}/logs/stream", s.streamApplicationLogs)
 	mux.HandleFunc("GET /metrics", s.getMetrics)
+	mux.HandleFunc("GET /operator/status", s.operatorStatus)
 	mux.HandleFunc("GET /applications/{id}/health", s.getApplicationHealth)
 	mux.HandleFunc("POST /applications/{id}/stop", s.stopApplication)
 	mux.HandleFunc("GET /applications/{id}/env", s.listEnv)

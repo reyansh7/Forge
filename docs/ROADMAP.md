@@ -38,9 +38,9 @@ Future-phase work must not be implemented merely because it is known to be requi
 
 | Kind | Phases | Meaning |
 |------|--------|---------|
-| **CURRENT** | 0, 1, 2, 3, 4 | Implemented. Local loopback PaaS with operator auth and observability. |
-| **NEXT** | 5 | Next authorized work only after `START PHASE 5`. |
-| **FUTURE** | 6–10 | Documented sequence. Not authorized. |
+| **CURRENT** | 0, 1, 2, 3, 4, 5 | Implemented. Local loopback PaaS with operator auth, observability, TLS opt-in, quotas, and backup. |
+| **NEXT** | 6 | Next authorized work only after `START PHASE 6`. |
+| **FUTURE** | 7–10 | Documented sequence. Not authorized. |
 
 Security requirements apply in every phase. Phases 3 and 5 add **depth**; they do not mark the start of security.
 
@@ -52,7 +52,7 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 2 Developer experience      COMPLETE
 3 Security hardening        COMPLETE
 4 Observability             COMPLETE
-5 Production hardening      NEXT (single node: TLS, quotas, backup, rate limits)
+5 Production hardening      COMPLETE
 6 Multi-node infrastructure
 7 Advanced platform
 8 Cloud / AWS readiness
@@ -62,7 +62,7 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 
 **Reasoning:** do not distribute or publicly expose an unauthenticated, weakly observed control plane. Authentication and deeper isolation (Phase 3) come before leaving loopback. Observability (Phase 4) comes before calling the system production. Production hardening (Phase 5) stays **single-node** so TLS, backups, and quotas exist before a second worker. Multi-node (Phase 6) waits until one node is trustworthy. Advanced PaaS features (Phase 7) wait until operation is honest. AWS (Phase 8) maps existing roles; it is not a rewrite. HA and multi-region come last.
 
-This **reorders unimplemented work**. Former “Phase 5 multi-node before Phase 6 production hardening” is rejected as less safe. Completed Phases 0–4 keep their numbers and status.
+This **reorders unimplemented work**. Former “Phase 5 multi-node before Phase 6 production hardening” is rejected as less safe. Completed Phases 0–5 keep their numbers and status.
 
 Phase 2 already ships **image rollback**. Later phases may add traffic-shifting strategies; they must not describe rollback as unimplemented.
 
@@ -262,7 +262,7 @@ Distributed tracing, alert routing, log retention quotas (Phase 5), AI summaries
 
 ## 8. Phase 5 — Production Hardening
 
-**Status: FUTURE.** Still **one machine**. Do not implement until `START PHASE 5`.
+**Status: COMPLETE** (authorized `START PHASE 5` / `START PAHSE 5`). Still **one machine**.
 
 ### Objective
 
@@ -272,23 +272,28 @@ Prepare realistic **external** use of a single node: encryption in transit, quot
 
 Phase 3 (auth) and Phase 4 (enough observability to see abuse and failed deploys).
 
-### Capabilities (increments)
+### Capabilities (implemented)
 
-- TLS for operator-facing and app-facing entry (automation such as ACME is in scope here; **custom DNS product UX** may wait for Phase 7)
-- Resource quotas beyond per-container flags (disk, deploy concurrency, log retention)
-- Rate limiting
-- Backup/restore of PostgreSQL (and documented Redis-loss behavior)
-- Disaster-recovery **runbook** and restore test; multi-region DR is Phase 10
-- Secure secret management (dedicated secret store or encrypted-at-rest design — not plaintext-equivalent logging)
-- Upgrade/migration strategy for control-plane schema
+- **Operator TLS (opt-in):** `go run ./cmd/forge-cert` writes `.forge/tls/`; set `FORGE_TLS_CERT_FILE` / `FORGE_TLS_KEY_FILE`. Default API remains HTTP on loopback. ACME is not enabled (`auto_https off`); public hostname UX is Phase 7
+- **App-facing TLS:** Caddy `:443` with `tls internal`, published `127.0.0.1:9443`. HTTP `127.0.0.1:9080` remains. `FORGE_PROXY_PUBLIC_BASE` stays the HTTP URL
+- **Quotas:** projects per owner, in-flight deploys per owner, fetched workspace bytes, build-log retention prune
+- **Rate limiting:** login/bootstrap (Phase 3) plus per-actor deploy attempts (10 / 10 minutes)
+- **Backup/restore:** `go run ./cmd/backup` / `-restore`; Redis-loss documented in `docs/DISASTER_RECOVERY.md`
+- **Env at rest:** AES-256-GCM (`enc:v1:`), key in `.forge/data.key` or `FORGE_DATA_KEY`. Not a vault
+- **Schema upgrades:** `docs/UPGRADES.md`; `GET /operator/status` lists applied migrations
+- **Public bind:** `0.0.0.0` / unspecified rejected unless `FORGE_ALLOW_PUBLIC_BIND=1`
 
 ### Security requirements
 
 TLS does not replace authorization. Backups are secrets. Restore drills must not use production credentials in git.
 
-### Verification / exit criteria
+### Verification / exit criteria (met)
 
-Restore tested. TLS verified. Quotas enforced with tests. No “bind to the world” without auth.
+Backup dump test when Postgres is reachable. Quota and rate-limit HTTP tests. Workspace disk-cap deploy test. Env cell ≠ plaintext when a crypter is set. Bind-to-world rejected without the flag. TLS pair required together.
+
+### Out of scope (then and still)
+
+Multi-node, ACME on a public hostname, team vault product, `0.0.0.0` as the default bind.
 
 ---
 
@@ -488,7 +493,9 @@ Before moving forward:
 
 **Phase 4 — COMPLETE** (authorized `implement phase 4`)
 
-**Phase 5 — FUTURE.** Do not start until the developer says `START PHASE 5`.
+**Phase 5 — COMPLETE** (authorized `START PHASE 5`)
+
+**Phase 6 — FUTURE.** Do not start until the developer says `START PHASE 6`.
 
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
@@ -505,6 +512,8 @@ Phase 2 (done): application settings (`root_directory`, `health_path`, `local_ho
 Phase 3 (done): operator bootstrap/login; project `owner_id`; session cookies/bearer; audit log; login rate limit; tighter `docker run` isolation (`--cap-drop ALL`, tmpfs, `--pull never`). Still loopback. Not TLS, not public bind, not a secret vault, not AWS.
 
 Phase 4 (done): structured API/worker logs; authorized SSE log follow; `/metrics` + `/observe`; deploy `duration_ms`. Not tracing, not alerts, not TLS.
+
+Phase 5 (done): opt-in API TLS; Caddy `tls internal` on `127.0.0.1:9443`; env AES-GCM at rest; project/deploy/workspace/log quotas; deploy rate limit; `cmd/backup`; `docs/DISASTER_RECOVERY.md` + `docs/UPGRADES.md`; `FORGE_ALLOW_PUBLIC_BIND` for `0.0.0.0`. Still one node. Not ACME, not a vault, not multi-node.
 
 ---
 

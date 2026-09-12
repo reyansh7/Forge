@@ -20,6 +20,7 @@ import (
 	"github.com/reyansh7/Forge/internal/proxy"
 	"github.com/reyansh7/Forge/internal/queue"
 	"github.com/reyansh7/Forge/internal/runtime"
+	"github.com/reyansh7/Forge/internal/secrets"
 	"github.com/reyansh7/Forge/internal/store"
 	"github.com/reyansh7/Forge/internal/worker"
 )
@@ -50,6 +51,15 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	// Same data key as cmd/api. Start both from the repo root so the
+	// default .forge/data.key file is shared. A mismatch injects
+	// ciphertext into the container environment.
+	box, err := secrets.LoadOrCreate(cfg.DataKeyFile, cfg.DataKey)
+	if err != nil {
+		return err
+	}
+	pg.SetCrypter(box)
+
 	q, err := queue.NewRedis(cfg.RedisURL, queue.DefaultKey)
 	if err != nil {
 		return err
@@ -59,14 +69,37 @@ func run(log *slog.Logger) error {
 	}
 
 	deployHandler := deploy.Handler{
-		Log:          log,
-		Store:        pg,
-		Fetcher:      runtime.HostFetcher{},
-		Builder:      runtime.HostDocker{},
-		Runner:       runtime.HostDocker{},
-		Router:       proxy.Caddy{AdminURL: cfg.CaddyAdminURL, UpstreamHost: cfg.CaddyUpstreamHost},
-		WorkspaceDir: cfg.WorkspaceDir,
-		ProxyBase:    cfg.ProxyPublicBase,
+		Log:               log,
+		Store:             pg,
+		Fetcher:           runtime.HostFetcher{},
+		Builder:           runtime.HostDocker{},
+		Runner:            runtime.HostDocker{},
+		Router:            proxy.Caddy{AdminURL: cfg.CaddyAdminURL, UpstreamHost: cfg.CaddyUpstreamHost},
+		WorkspaceDir:      cfg.WorkspaceDir,
+		WorkspaceMaxBytes: cfg.WorkspaceMaxBytes,
+		ProxyBase:         cfg.ProxyPublicBase,
+	}
+
+	// A killed worker leaves rows in BUILDING. Those block Deploy until
+	// someone Stops. Close them here so a restart unsticks the app.
+	if stale, err := pg.ListInterruptedDeployments(ctx); err != nil {
+		log.Error("list in-progress deployments failed", "err", err)
+	} else {
+		docker := runtime.HostDocker{}
+		for _, d := range stale {
+			if d.ID != "" {
+				_ = docker.Stop(ctx, runtime.ResolveContainerName(d.ID, d.ContainerName))
+			}
+			stage := string(d.Status)
+			d.FailedStage = stage
+			d.Status = store.StatusFailed
+			d.ErrorMessage = store.SanitizeErrorMessage("worker restarted before this deploy finished")
+			if err := pg.UpdateDeployment(ctx, d); err != nil {
+				log.Error("abandon stale deploy failed", "id", d.ID, "err", err)
+			} else {
+				log.Info("abandoned stale deploy", "id", d.ID, "was", stage)
+			}
+		}
 	}
 
 	// Caddy's in-memory config dies on container restart. Re-apply LIVE

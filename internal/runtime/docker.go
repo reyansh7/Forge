@@ -17,7 +17,7 @@ import (
 	"github.com/reyansh7/Forge/internal/detect"
 )
 
-// EnvPair is one KEY=VALUE injected at `docker run`.
+// EnvPair is one KEY=VALUE injected at `docker build` and `docker run`.
 //
 // This type lives in runtime (not store) so Docker isolation does not
 // import the persistence package. The worker maps store.EnvVar here
@@ -28,28 +28,35 @@ type EnvPair struct {
 	Value string
 }
 
-// ContainerName is the docker --name for a deployment. Hyphens are
-// stripped so the name stays a single DNS-ish token.
-func ContainerName(deploymentID string) string {
-	return "forge-run-" + strings.ReplaceAll(deploymentID, "-", "")
-}
-
 // Builder turns a source directory into a local image name.
+//
+// kind is the pack ID from detect (runtime_kind). HostDocker re-runs
+// detect.Tree and writes a Forge Dockerfile when the repo has none.
 //
 // The returned string is docker build's combined output (truncated by
 // the worker before Postgres). Tests can return a stub log. A build
 // failure still returns whatever output was captured so the dashboard
 // can show why docker build died.
+//
+// env is applied at build time (Vite/Next/CRA public keys) and again
+// at docker run for server processes. Values must not be written into
+// build_log by Forge; docker itself may echo ARG names.
 type Builder interface {
-	Build(ctx context.Context, dir, image, kind string) (buildLog string, err error)
+	Build(ctx context.Context, dir, image, kind string, env []EnvPair) (buildLog string, err error)
 }
 
 // Runner starts and stops isolated containers. Implementations must not
 // mount the host Docker socket into the workload.
 type Runner interface {
-	Run(ctx context.Context, image, containerName string, env []EnvPair) (Instance, error)
+	// containerPort is the listen port inside the image (EXPOSE / pack
+	// default). 0 means detect.DefaultPort. The host publish port is
+	// allocated separately and stored on the deployment.
+	Run(ctx context.Context, image, containerName string, env []EnvPair, containerPort int) (Instance, error)
 	Stop(ctx context.Context, containerName string) error
 	Logs(ctx context.Context, containerName string, tail int) (string, error)
+	// Inspect is required so the worker can fail a dead container
+	// before the health loop. Tests return a stub running state.
+	Inspect(ctx context.Context, containerName string) (ContainerState, error)
 }
 
 // Running reports whether a named container is currently up.
@@ -81,14 +88,28 @@ type Instance struct {
 // *inside* build and run, not as `sh -c` on the host.
 type HostDocker struct{}
 
-func (HostDocker) Build(ctx context.Context, dir, image, kind string) (string, error) {
+func (HostDocker) Build(ctx context.Context, dir, image, kind string, env []EnvPair) (string, error) {
 	if err := prepareDockerfile(dir, kind); err != nil {
+		return "", err
+	}
+	if err := writeProductionEnv(dir, env); err != nil {
 		return "", err
 	}
 	if err := validateImageName(image); err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, "docker", "build", "-t", image, "--", dir)
+	args := []string{"build", "-t", image}
+	for _, ev := range env {
+		if err := validateEnvPair(ev); err != nil {
+			return "", err
+		}
+		// --build-arg is for operator Dockerfiles that declare ARG.
+		// Vite/CRA/Next read .env.production.local from the context
+		// (written above). Do not log these values.
+		args = append(args, "--build-arg", ev.Key+"="+ev.Value)
+	}
+	args = append(args, "--", dir)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	// docker build runs the Dockerfile as untrusted execution inside
 	// the build container. We do not pass --network=host, --privileged,
 	// or -v /var/run/docker.sock. The build can still reach the public
@@ -104,12 +125,15 @@ func (HostDocker) Build(ctx context.Context, dir, image, kind string) (string, e
 	return log, nil
 }
 
-func (HostDocker) Run(ctx context.Context, image, containerName string, env []EnvPair) (Instance, error) {
+func (HostDocker) Run(ctx context.Context, image, containerName string, env []EnvPair, containerPort int) (Instance, error) {
 	if err := validateImageName(image); err != nil {
 		return Instance{}, err
 	}
 	if err := validateContainerName(containerName); err != nil {
 		return Instance{}, err
+	}
+	if containerPort < 1 || containerPort > 65535 {
+		containerPort = detect.DefaultPort
 	}
 
 	port, err := freeLoopbackPort()
@@ -122,9 +146,9 @@ func (HostDocker) Run(ctx context.Context, image, containerName string, env []En
 	// - memory / cpu / pids caps
 	// - cap-drop ALL, tmpfs /tmp, pull=never
 	// - no --privileged, no volume mounts, no Docker socket
-	// - user env first, then PORT=8080 so Forge wins if a key collides
-	publish := "127.0.0.1:" + strconv.Itoa(port) + ":8080"
-	args, err := dockerRunArgs(image, containerName, publish, env)
+	// - user env first, then PORT=<detected> so Forge wins if a key collides
+	publish := "127.0.0.1:" + strconv.Itoa(port) + ":" + strconv.Itoa(containerPort)
+	args, err := dockerRunArgs(image, containerName, publish, env, containerPort)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -152,7 +176,7 @@ func (HostDocker) Run(ctx context.Context, image, containerName string, env []En
 // Still forbidden: --privileged, Docker socket mounts, host network,
 // publishing on 0.0.0.0. Read-only rootfs is not set — many images
 // write under /app (pyc, npm) and would fail closed incorrectly.
-func dockerRunArgs(image, containerName, publish string, env []EnvPair) ([]string, error) {
+func dockerRunArgs(image, containerName, publish string, env []EnvPair, containerPort int) ([]string, error) {
 	args := []string{
 		"run", "-d",
 		"--name", containerName,
@@ -170,7 +194,10 @@ func dockerRunArgs(image, containerName, publish string, env []EnvPair) ([]strin
 		}
 		args = append(args, "-e", ev.Key+"="+ev.Value)
 	}
-	args = append(args, "-e", "PORT=8080", "-p", publish, "--", image)
+	if containerPort < 1 || containerPort > 65535 {
+		containerPort = detect.DefaultPort
+	}
+	args = append(args, "-e", "HOST=0.0.0.0", "-e", "PORT="+strconv.Itoa(containerPort), "-p", publish, "--", image)
 	return args, nil
 }
 
@@ -278,16 +305,37 @@ func (HostDocker) FollowLogs(ctx context.Context, containerName string, tail int
 }
 
 func prepareDockerfile(dir, kind string) error {
-	switch detect.Kind(kind) {
-	case detect.KindDockerfile:
-		return nil
-	case detect.KindNode:
-		return writeIfAbsent(filepath.Join(dir, "Dockerfile"), nodeDockerfile)
-	case detect.KindGo:
-		return writeIfAbsent(filepath.Join(dir, "Dockerfile"), goDockerfile)
-	default:
-		return fmt.Errorf("docker build: unknown kind %q", kind)
+	// Re-inspect the confined tree. The worker already ran detect.Tree;
+	// doing it again keeps Builder’s signature (kind string) stable and
+	// ensures the recipe matches the files we are about to COPY.
+	spec, err := detect.Tree(dir)
+	if err != nil {
+		if kind != "" {
+			return fmt.Errorf("docker build: %w", err)
+		}
+		return err
 	}
+	if err := writeExtraFiles(dir, spec.ExtraFiles); err != nil {
+		return err
+	}
+	if spec.GeneratedDockerfile == "" {
+		return nil
+	}
+	return writeIfAbsent(filepath.Join(dir, "Dockerfile"), spec.GeneratedDockerfile)
+}
+
+func writeExtraFiles(dir string, files map[string]string) error {
+	for name, body := range files {
+		// Basenames only. A generated sidecar must not escape the
+		// confined build directory via ../ or a slash.
+		if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+			return fmt.Errorf("docker build: refused generated file %q", name)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeIfAbsent(path, body string) error {
@@ -296,27 +344,6 @@ func writeIfAbsent(path, body string) error {
 	}
 	return os.WriteFile(path, []byte(body), 0o600)
 }
-
-// Forge-owned Dockerfiles. npm/go run inside the build container, not
-// on the control-plane host. They are still untrusted execution — just
-// isolated.
-const nodeDockerfile = `FROM node:20-alpine
-WORKDIR /app
-COPY . .
-RUN npm install --omit=dev
-ENV PORT=8080
-EXPOSE 8080
-CMD ["npm","start"]
-`
-
-const goDockerfile = `FROM golang:1.22-alpine
-WORKDIR /app
-COPY . .
-RUN CGO_ENABLED=0 go build -o /app/app .
-ENV PORT=8080
-EXPOSE 8080
-CMD ["/app/app"]
-`
 
 func validateImageName(name string) error {
 	if name == "" || strings.ContainsAny(name, " \t\n/:@") {
@@ -336,8 +363,8 @@ func validateEnvPair(p EnvPair) error {
 	if p.Key == "" || !envKeyPattern.MatchString(p.Key) {
 		return fmt.Errorf("invalid env key")
 	}
-	if strings.EqualFold(p.Key, "PORT") {
-		return fmt.Errorf("PORT is reserved by Forge")
+	if strings.EqualFold(p.Key, "PORT") || strings.EqualFold(p.Key, "HOST") {
+		return fmt.Errorf("%s is reserved by Forge", strings.ToUpper(p.Key))
 	}
 	if strings.HasPrefix(strings.ToUpper(p.Key), "FORGE_") {
 		return fmt.Errorf("FORGE_ keys are reserved")
@@ -390,35 +417,5 @@ func HealthGETPath(ctx context.Context, port int, path string, timeout time.Dura
 	if !strings.HasPrefix(path, "/") || strings.Contains(path, "://") || strings.ContainsAny(path, "\r\n\x00 ") {
 		return fmt.Errorf("health: invalid path")
 	}
-	deadline := time.Now().Add(timeout)
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("health: timed out waiting for %s", url)
-		}
-		reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		req, err := newGET(reqCtx, url)
-		if err != nil {
-			cancel()
-			return err
-		}
-		resp, err := httpClient.Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-			cancel()
-			if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
-				return nil
-			}
-		} else {
-			cancel()
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(400 * time.Millisecond):
-		}
-	}
+	return ProbeHTTP(ctx, Probe{Port: port, Path: path, Timeout: timeout})
 }

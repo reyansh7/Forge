@@ -58,6 +58,41 @@ func TestLoadWorkerRequiresDatabaseAndRedis(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnspecifiedBind(t *testing.T) {
+	t.Setenv("FORGE_API_ADDR", "0.0.0.0:8080")
+	t.Setenv("FORGE_DATABASE_URL", "postgres://example")
+	t.Setenv("FORGE_REDIS_URL", "redis://example")
+	t.Setenv("FORGE_ALLOW_PUBLIC_BIND", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for 0.0.0.0 without FORGE_ALLOW_PUBLIC_BIND")
+	}
+}
+
+func TestLoadAllowsPublicBindWhenFlagged(t *testing.T) {
+	t.Setenv("FORGE_API_ADDR", "0.0.0.0:8080")
+	t.Setenv("FORGE_DATABASE_URL", "postgres://example")
+	t.Setenv("FORGE_REDIS_URL", "redis://example")
+	t.Setenv("FORGE_ALLOW_PUBLIC_BIND", "1")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AllowPublicBind {
+		t.Fatal("expected AllowPublicBind")
+	}
+}
+
+func TestLoadTLSPairRequired(t *testing.T) {
+	t.Setenv("FORGE_API_ADDR", "127.0.0.1:8080")
+	t.Setenv("FORGE_DATABASE_URL", "postgres://example")
+	t.Setenv("FORGE_REDIS_URL", "redis://example")
+	t.Setenv("FORGE_TLS_CERT_FILE", "cert.pem")
+	t.Setenv("FORGE_TLS_KEY_FILE", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when only the cert is set")
+	}
+}
+
 func TestLoadHonorsAddrOverride(t *testing.T) {
 	t.Setenv("FORGE_API_ADDR", "127.0.0.1:9090")
 	t.Setenv("FORGE_DATABASE_URL", "postgres://example")

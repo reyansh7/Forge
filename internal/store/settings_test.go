@@ -39,6 +39,22 @@ func TestValidateHealthPath(t *testing.T) {
 	}
 }
 
+func TestSuggestedLocalHost(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	if got := SuggestedLocalHost("My Portfolio", id); got != "my-portfolio" {
+		t.Fatalf("named = %q", got)
+	}
+	if got := SuggestedLocalHost("app", id); got != "app-aaaa" {
+		t.Fatalf("default app = %q", got)
+	}
+	if got := SuggestedLocalHost("forge", id); got != "forge-aaaa" {
+		t.Fatalf("reserved = %q", got)
+	}
+	if got := SuggestedLocalHost("", "nope"); got != "app-0000" {
+		t.Fatalf("empty = %q", got)
+	}
+}
+
 func TestValidateLocalHost(t *testing.T) {
 	got, err := ValidateLocalHost("Hello-App")
 	if err != nil || got != "hello-app" {

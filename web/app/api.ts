@@ -26,6 +26,12 @@ export type Deployment = {
   failed_stage?: string;
   error_message?: string;
   runtime_kind?: string;
+  runtime_type?: string;
+  port_source?: string;
+  host_port?: number;
+  listen_port?: number;
+  container_id?: string;
+  container_name?: string;
   public_url?: string;
   image_name?: string;
   build_log?: string;
@@ -309,22 +315,7 @@ export function rollbackDeployment(sourceId: string): Promise<Deployment> {
   }).then((r) => parse<Deployment>(r));
 }
 
-/** Split a pasted KEY=VALUE block. Lines starting with # are ignored. */
-export function parseDotEnv(text: string): EnvVar[] {
-  const out: EnvVar[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    const eq = trimmed.indexOf("=");
-    if (eq < 1) {
-      continue;
-    }
-    out.push({ key: trimmed.slice(0, eq).trim(), value: trimmed.slice(eq + 1) });
-  }
-  return out;
-}
+export { mergeEnv, parseDotEnv, parseDotEnvDetailed } from "./dotenv";
 
 export type ObserveMetrics = {
   http_requests_total: number;

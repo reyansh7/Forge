@@ -73,8 +73,22 @@ func RenderCaddyfile(upstreamHost string, live []store.Deployment) []byte {
 		upstreamHost = "host.docker.internal"
 	}
 	var b bytes.Buffer
+	// auto_https off: we do not want ACME on loopback. :443 uses
+	// Caddy's local CA (`tls internal`). Public Let's Encrypt waits
+	// for a real hostname (Phase 7).
 	b.WriteString("{\n\tadmin 0.0.0.0:2019\n\tauto_https off\n}\n\n")
 	b.WriteString(":80 {\n")
+	writeAppRoutes(&b, upstreamHost, live)
+	b.WriteString("\trespond \"Forge proxy: no live deployment at this path\" 404\n")
+	b.WriteString("}\n\n")
+	b.WriteString(":443 {\n\ttls internal\n")
+	writeAppRoutes(&b, upstreamHost, live)
+	b.WriteString("\trespond \"Forge proxy: no live deployment at this path\" 404\n")
+	b.WriteString("}\n")
+	return b.Bytes()
+}
+
+func writeAppRoutes(b *bytes.Buffer, upstreamHost string, live []store.Deployment) {
 	for _, d := range live {
 		if d.HostPort < 1 || d.HostPort > 65535 {
 			continue
@@ -84,31 +98,76 @@ func RenderCaddyfile(upstreamHost string, live []store.Deployment) []byte {
 			continue
 		}
 		upstream := upstreamHost + ":" + strconv.Itoa(d.HostPort)
+		tag := strings.ReplaceAll(id, "-", "")
 		// Optional Host route: http://{slug}.localhost:9080/ → same
-		// container as /d/{id}/. This is local DX, not public DNS/TLS.
-		// Re-validate the slug so a corrupted row cannot inject Caddy
-		// syntax or a regex that matches every Host.
-		if slug := localHostSlug(d.LocalHost); slug != "" {
+		// container as /d/{id}/. This is local DX, not public DNS.
+		// SPAs that request /assets/* from the origin root work here
+		// because the Host is mounted at /.
+		//
+		// ListLiveDeployments joins applications.local_host. A
+		// worker-assigned slug is stored on public_url, not always
+		// on the application row — recover it so the next Caddy
+		// reload does not drop the Host matcher.
+		slug := localHostSlug(d.LocalHost)
+		if slug == "" {
+			slug = slugFromPublicURL(d.PublicURL)
+		}
+		if slug != "" {
 			b.WriteString("\t@host_")
-			b.WriteString(strings.ReplaceAll(id, "-", ""))
+			b.WriteString(tag)
 			b.WriteString(" header_regexp host (?i)^")
 			b.WriteString(slug)
 			b.WriteString(`\.localhost(?::\d+)?$`)
 			b.WriteString("\n\thandle @host_")
-			b.WriteString(strings.ReplaceAll(id, "-", ""))
+			b.WriteString(tag)
 			b.WriteString(" {\n\t\treverse_proxy ")
 			b.WriteString(upstream)
 			b.WriteString("\n\t}\n")
 		}
+		// /d/{id} without a slash would make relative ./assets resolve
+		// to /d/assets (wrong). Force the trailing slash.
+		b.WriteString("\tredir /d/")
+		b.WriteString(id)
+		b.WriteString(" /d/")
+		b.WriteString(id)
+		b.WriteString("/ 308\n")
 		b.WriteString("\thandle_path /d/")
 		b.WriteString(id)
 		b.WriteString("/* {\n\t\treverse_proxy ")
 		b.WriteString(upstream)
 		b.WriteString("\n\t}\n")
+		// Vite/CRA default builds request /index-HASH.js from the
+		// origin root, not /d/{id}/assets/.... The HTML came from
+		// /d/{id}/, so the browser sends that path as Referer. Route
+		// those orphan origin-root GETs back to the same upstream.
+		// This is not a new exposure: the app is already public on
+		// its path and Host URLs. Referer is not an authorization
+		// check — it only picks which live deployment receives a
+		// request that would otherwise 404 at the proxy.
+		b.WriteString("\t@ref_")
+		b.WriteString(tag)
+		b.WriteString(" {\n\t\theader_regexp Referer (?i)/d/")
+		b.WriteString(id)
+		b.WriteString("(?:/|$)\n\t\tnot path /d/*\n\t}\n")
+		b.WriteString("\thandle @ref_")
+		b.WriteString(tag)
+		b.WriteString(" {\n\t\treverse_proxy ")
+		b.WriteString(upstream)
+		b.WriteString("\n\t}\n")
 	}
-	b.WriteString("\trespond \"Forge proxy: no live deployment at this path\" 404\n")
-	b.WriteString("}\n")
-	return b.Bytes()
+}
+
+func slugFromPublicURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	const suffix = ".localhost"
+	if !strings.HasSuffix(host, suffix) {
+		return ""
+	}
+	return localHostSlug(strings.TrimSuffix(host, suffix))
 }
 
 func localHostSlug(raw string) string {

@@ -33,3 +33,7 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+# Phase 5 local secrets and SQL dumps (never commit)
+.forge/
+backups/

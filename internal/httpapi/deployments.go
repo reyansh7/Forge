@@ -25,6 +25,7 @@ type DeploymentStore interface {
 	ListDeploymentsByApplication(ctx context.Context, applicationID string) ([]store.Deployment, error)
 	ListLiveDeployments(ctx context.Context) ([]store.Deployment, error)
 	UpdateDeployment(ctx context.Context, d store.Deployment) error
+	CountInProgressByOwner(ctx context.Context, ownerID string) (int, error)
 }
 
 type deploymentResponse struct {
@@ -35,6 +36,12 @@ type deploymentResponse struct {
 	FailedStage   string    `json:"failed_stage,omitempty"`
 	ErrorMessage  string    `json:"error_message,omitempty"`
 	RuntimeKind   string    `json:"runtime_kind,omitempty"`
+	RuntimeType   string    `json:"runtime_type,omitempty"`
+	PortSource    string    `json:"port_source,omitempty"`
+	HostPort      int       `json:"host_port,omitempty"`
+	ListenPort    int       `json:"listen_port,omitempty"`
+	ContainerID   string    `json:"container_id,omitempty"`
+	ContainerName string    `json:"container_name,omitempty"`
 	PublicURL     string    `json:"public_url,omitempty"`
 	ImageName     string    `json:"image_name,omitempty"`
 	BuildLog      string    `json:"build_log,omitempty"`
@@ -54,6 +61,12 @@ func deploymentResponseFrom(d store.Deployment) deploymentResponse {
 		FailedStage:   d.FailedStage,
 		ErrorMessage:  d.ErrorMessage,
 		RuntimeKind:   d.RuntimeKind,
+		RuntimeType:   d.RuntimeType,
+		PortSource:    d.PortSource,
+		HostPort:      d.HostPort,
+		ListenPort:    d.ListenPort,
+		ContainerID:   d.ContainerID,
+		ContainerName: runtime.ResolveContainerName(d.ID, d.ContainerName),
 		PublicURL:     d.PublicURL,
 		ImageName:     d.ImageName,
 		BuildLog:      d.BuildLog,
@@ -123,6 +136,28 @@ func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) enqueueDeployment(w http.ResponseWriter, r *http.Request, ctx context.Context, applicationID string) {
+	actor, ok := ActorFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !s.deployAttempts().allow(actor.UserID) {
+		writeError(w, http.StatusTooManyRequests, "too many deploy attempts")
+		return
+	}
+	if max := s.inflightQuota(); max > 0 {
+		n, err := s.Deployments.CountInProgressByOwner(ctx, actor.UserID)
+		if err != nil {
+			s.logger().Error("count in-progress deploys failed", "err", err)
+			writeError(w, http.StatusInternalServerError, "failed to create deployment")
+			return
+		}
+		if n >= max {
+			writeError(w, http.StatusConflict, "deploy concurrency quota exceeded")
+			return
+		}
+	}
+
 	list, err := s.Deployments.ListDeploymentsByApplication(ctx, applicationID)
 	if err != nil {
 		s.logger().Error("list deployments before enqueue failed", "err", err)
@@ -144,7 +179,7 @@ func (s *Server) enqueueDeployment(w http.ResponseWriter, r *http.Request, ctx c
 		// actually running must be Stopped first — do not stack another.
 		running := true
 		if s.Runtime != nil {
-			ok, runErr := s.Runtime.Running(ctx, runtime.ContainerName(existing.ID))
+			ok, runErr := s.Runtime.Running(ctx, runtime.ResolveContainerName(existing.ID, existing.ContainerName))
 			if runErr != nil {
 				s.logger().Error("inspect live container failed", "err", runErr)
 				writeError(w, http.StatusInternalServerError, "failed to create deployment")
@@ -340,7 +375,7 @@ func (s *Server) enqueueRollback(w http.ResponseWriter, r *http.Request, ctx con
 		}
 		running := true
 		if s.Runtime != nil {
-			ok, runErr := s.Runtime.Running(ctx, runtime.ContainerName(existing.ID))
+			ok, runErr := s.Runtime.Running(ctx, runtime.ResolveContainerName(existing.ID, existing.ContainerName))
 			if runErr != nil {
 				s.logger().Error("inspect live container failed", "err", runErr)
 				writeError(w, http.StatusInternalServerError, "failed to roll back")

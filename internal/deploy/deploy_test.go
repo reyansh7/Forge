@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ type stubBuild struct {
 	log string
 }
 
-func (s stubBuild) Build(_ context.Context, _, _, _ string) (string, error) {
+func (s stubBuild) Build(_ context.Context, _, _, _ string, _ []runtime.EnvPair) (string, error) {
 	return s.log, s.err
 }
 
@@ -71,7 +72,7 @@ type stubRun struct {
 	stopped []string
 }
 
-func (s *stubRun) Run(_ context.Context, _, _ string, env []runtime.EnvPair) (runtime.Instance, error) {
+func (s *stubRun) Run(_ context.Context, _, _ string, env []runtime.EnvPair, _ int) (runtime.Instance, error) {
 	s.env = env
 	return runtime.Instance{ContainerID: "cid", HostPort: 49152}, nil
 }
@@ -82,6 +83,10 @@ func (s *stubRun) Stop(_ context.Context, name string) error {
 }
 
 func (stubRun) Logs(context.Context, string, int) (string, error) { return "", nil }
+
+func (stubRun) Inspect(context.Context, string) (runtime.ContainerState, error) {
+	return runtime.ContainerState{Exists: true, Running: true, Status: "running"}, nil
+}
 
 type stubRouter struct{ n int }
 
@@ -95,12 +100,35 @@ func testJob(id string) queue.Job {
 	return queue.Job{ID: "j1", Type: queue.TypeDeploy, Payload: raw}
 }
 
+func TestHandlerNoopsWhenAlreadyFailed(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	pid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
+	aid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
+	st := &mem{
+		app: store.Application{ID: aid, ProjectID: pid, Name: "app", RepositoryURL: store.SampleHelloURL},
+		dep: store.Deployment{ID: id, ProjectID: pid, ApplicationID: aid, Status: store.StatusFailed, FailedStage: "building"},
+	}
+	h := Handler{
+		Store:   st,
+		Fetcher: stubFetch{},
+		Builder: boomBuild{},
+		Runner:  &stubRun{},
+		Router:  &stubRouter{},
+	}
+	if err := h.Handle(context.Background(), testJob(id)); err != nil {
+		t.Fatal(err)
+	}
+	if st.dep.Status != store.StatusFailed {
+		t.Fatalf("status = %q", st.dep.Status)
+	}
+}
+
 func TestHandlerHappyPath(t *testing.T) {
 	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	pid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
 	aid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
 	st := &mem{
-		app: store.Application{ID: aid, ProjectID: pid, RepositoryURL: store.SampleHelloURL},
+		app: store.Application{ID: aid, ProjectID: pid, Name: "My Portfolio", RepositoryURL: store.SampleHelloURL},
 		dep: store.Deployment{ID: id, ProjectID: pid, ApplicationID: aid, Status: store.StatusQueued},
 		env: []store.EnvVar{{Key: "GREETING", Value: "hi"}},
 	}
@@ -121,14 +149,20 @@ func TestHandlerHappyPath(t *testing.T) {
 	if st.dep.Status != store.StatusLive {
 		t.Fatalf("status = %q", st.dep.Status)
 	}
-	if st.dep.PublicURL != "http://127.0.0.1:9080/d/"+id+"/" {
+	if st.dep.PublicURL != "http://my-portfolio.localhost:9080/" {
 		t.Fatalf("url = %q", st.dep.PublicURL)
+	}
+	if st.dep.LocalHost != "my-portfolio" {
+		t.Fatalf("local_host = %q", st.dep.LocalHost)
 	}
 	if rt.n != 1 {
 		t.Fatalf("caddy applies = %d", rt.n)
 	}
 	if len(run.env) != 1 || run.env[0].Key != "GREETING" || run.env[0].Value != "hi" {
 		t.Fatalf("env = %#v", run.env)
+	}
+	if st.dep.ContainerName != runtime.WorkloadName(st.app.Name, id) {
+		t.Fatalf("container_name = %q", st.dep.ContainerName)
 	}
 }
 
@@ -154,8 +188,33 @@ func TestHandlerRecordsBuildFailure(t *testing.T) {
 	if st.dep.Status != store.StatusFailed || st.dep.FailedStage != string(store.StatusBuilding) {
 		t.Fatalf("status=%q stage=%q", st.dep.Status, st.dep.FailedStage)
 	}
-	if st.dep.BuildLog != "line1\n" {
+	if !strings.Contains(st.dep.BuildLog, "line1") || !strings.Contains(st.dep.BuildLog, "[detect]") {
 		t.Fatalf("build_log = %q", st.dep.BuildLog)
+	}
+}
+
+func TestHandlerRejectsOversizeWorkspace(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	pid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
+	aid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
+	st := &mem{
+		app: store.Application{ID: aid, ProjectID: pid, RepositoryURL: store.SampleHelloURL},
+		dep: store.Deployment{ID: id, ProjectID: pid, ApplicationID: aid, Status: store.StatusQueued},
+	}
+	h := Handler{
+		Store:             st,
+		Fetcher:           stubFetch{},
+		Builder:           stubBuild{},
+		Runner:            &stubRun{},
+		Router:            &stubRouter{},
+		WorkspaceMaxBytes: 1,
+		Health:            func(context.Context, int, time.Duration) error { return nil },
+	}
+	if err := h.Handle(context.Background(), testJob(id)); err == nil {
+		t.Fatal("expected workspace quota error")
+	}
+	if st.dep.Status != store.StatusFailed || st.dep.FailedStage != string(store.StatusDetecting) {
+		t.Fatalf("status=%q stage=%q", st.dep.Status, st.dep.FailedStage)
 	}
 }
 
@@ -220,8 +279,45 @@ func (boomFetch) Fetch(context.Context, string, string) error {
 
 type boomBuild struct{}
 
-func (boomBuild) Build(context.Context, string, string, string) (string, error) {
+func (boomBuild) Build(context.Context, string, string, string, []runtime.EnvPair) (string, error) {
 	return "", errors.New("must not build on rollback")
+}
+
+type deadRun struct{ stubRun }
+
+func (deadRun) Inspect(context.Context, string) (runtime.ContainerState, error) {
+	return runtime.ContainerState{Exists: true, Running: false, Status: "exited", ExitCode: 1}, nil
+}
+
+func TestHandlerFailsWhenContainerExits(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	pid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
+	aid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
+	st := &mem{
+		app: store.Application{ID: aid, ProjectID: pid, Name: "demo", RepositoryURL: store.SampleHelloURL},
+		dep: store.Deployment{ID: id, ProjectID: pid, ApplicationID: aid, Status: store.StatusQueued},
+	}
+	run := &deadRun{}
+	h := Handler{
+		Store:   st,
+		Fetcher: stubFetch{},
+		Builder: stubBuild{},
+		Runner:  run,
+		Router:  &stubRouter{},
+		Health:  func(context.Context, int, time.Duration) error { return errors.New("health must not run") },
+	}
+	if err := h.Handle(context.Background(), testJob(id)); err == nil {
+		t.Fatal("expected error")
+	}
+	if st.dep.Status != store.StatusFailed || st.dep.FailedStage != string(store.StatusDeploying) {
+		t.Fatalf("status=%q stage=%q", st.dep.Status, st.dep.FailedStage)
+	}
+	if !strings.Contains(st.dep.ErrorMessage, "exited immediately") {
+		t.Fatalf("err = %q", st.dep.ErrorMessage)
+	}
+	if len(run.stopped) == 0 {
+		t.Fatal("failed container must be removed")
+	}
 }
 
 func TestHandlerRollbackReusesImage(t *testing.T) {

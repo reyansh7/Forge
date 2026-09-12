@@ -120,3 +120,23 @@ func migrationFileNames() ([]string, error) {
 	sort.Strings(names)
 	return names, nil
 }
+
+// SchemaVersions returns applied migration filenames, oldest first.
+func (p *Postgres) SchemaVersions(ctx context.Context) ([]string, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT version FROM schema_migrations ORDER BY version ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list schema versions: %w", err)
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("scan schema version: %w", err)
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}

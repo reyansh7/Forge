@@ -15,8 +15,17 @@ func TestRenderCaddyfileIncludesValidatedRoute(t *testing.T) {
 	if !strings.Contains(raw, "handle_path /d/"+id+"/*") {
 		t.Fatalf("missing handle: %s", raw)
 	}
+	if !strings.Contains(raw, "redir /d/"+id+" /d/"+id+"/ 308") {
+		t.Fatalf("missing trailing-slash redirect: %s", raw)
+	}
+	if !strings.Contains(raw, "header_regexp Referer (?i)/d/"+id+`(?:/|$)`) {
+		t.Fatalf("missing referer fallback: %s", raw)
+	}
 	if !strings.Contains(raw, "host.docker.internal:49152") {
 		t.Fatalf("missing upstream: %s", raw)
+	}
+	if !strings.Contains(raw, "tls internal") || !strings.Contains(raw, ":443") {
+		t.Fatalf("missing app-facing TLS block: %s", raw)
 	}
 }
 
@@ -49,6 +58,16 @@ func TestRenderCaddyfileSkipsUnsafeSlug(t *testing.T) {
 	}))
 	if strings.Contains(raw, "foo.bar") {
 		t.Fatalf("must not interpolate unsafe slug: %s", raw)
+	}
+}
+
+func TestRenderCaddyfileRecoversSlugFromPublicURL(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	raw := string(RenderCaddyfile("host.docker.internal", []store.Deployment{
+		{ID: id, HostPort: 49152, PublicURL: "http://my-portfolio.localhost:9080/"},
+	}))
+	if !strings.Contains(raw, `header_regexp host (?i)^my-portfolio\.localhost(?::\d+)?$`) {
+		t.Fatalf("missing recovered host matcher: %s", raw)
 	}
 }
 

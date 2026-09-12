@@ -19,7 +19,8 @@ import {
   isBundledSample,
   listApplicationDeployments,
   listEnv,
-  parseDotEnv,
+  mergeEnv,
+  parseDotEnvDetailed,
   putEnv,
   replaceEnv,
   rollbackDeployment,
@@ -62,6 +63,7 @@ export default function ApplicationPage() {
   const [envKey, setEnvKey] = useState("");
   const [envValue, setEnvValue] = useState("");
   const [envBulk, setEnvBulk] = useState("");
+  const [envFileName, setEnvFileName] = useState("");
   const [showEnv, setShowEnv] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
@@ -207,8 +209,16 @@ export default function ApplicationPage() {
     setError("");
     try {
       const d = await stopApplication(id);
-      setDeployments((cur) => cur.map((x) => (x.id === d.id ? d : x)));
-      setHealth(await getApplicationHealth(id));
+      setDeployments((cur) => {
+        const next = cur.map((x) => (x.id === d.id ? d : x));
+        return next.some((x) => x.id === d.id) ? next : [d, ...next];
+      });
+      try {
+        setHealth(await getApplicationHealth(id));
+      } catch {
+        setHealth(null);
+      }
+      setDeployments(await listApplicationDeployments(id));
     } catch (err) {
       setError(err instanceof Error ? err.message : "stop failed");
     } finally {
@@ -245,19 +255,38 @@ export default function ApplicationPage() {
     }
   }
 
-  async function onEnvBulk(e: FormEvent) {
-    e.preventDefault();
+  const envParsed = parseDotEnvDetailed(envBulk);
+
+  async function applyEnvFile(mode: "merge" | "replace") {
     setBusy("envbulk");
     setError("");
     try {
-      const vars = parseDotEnv(envBulk);
+      if (envParsed.vars.length === 0) {
+        throw new Error("no KEY=VALUE lines found in the pasted or uploaded file");
+      }
+      const vars = mode === "merge" ? mergeEnv(env, envParsed.vars) : envParsed.vars;
       setEnv(await replaceEnv(id, vars));
       setEnvBulk("");
+      setEnvFileName("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "env replace failed");
+      setError(err instanceof Error ? err.message : "env import failed");
     } finally {
       setBusy("");
     }
+  }
+
+  async function onEnvFile(file: File | undefined) {
+    if (!file) {
+      return;
+    }
+    if (file.size > 256 * 1024) {
+      setError("env file must be at most 256 KB");
+      return;
+    }
+    setError("");
+    const text = await file.text();
+    setEnvBulk(text);
+    setEnvFileName(file.name);
   }
 
   async function onDeleteEnv(key: string) {
@@ -316,8 +345,13 @@ export default function ApplicationPage() {
   const deployBlocked = inProgress || (!!liveRow && running);
   const localURL = app?.local_host ? `http://${app.local_host}.localhost:9080/` : "";
   const publicURL = health?.public_url || liveRow?.public_url || "";
-  const visitURL = localURL || publicURL;
-  const visitLabel = localURL ? `${app?.local_host}.localhost:9080` : publicURL;
+  const pathURL = liveRow ? `http://127.0.0.1:9080/d/${liveRow.id}/` : "";
+  const visitURL = localURL || publicURL || pathURL;
+  const visitLabel = localURL
+    ? `${app?.local_host}.localhost:9080`
+    : publicURL.includes(".localhost:")
+      ? publicURL.replace(/^https?:\/\//, "").replace(/\/$/, "")
+      : publicURL;
   const pending = deployments.find((d) => isInProgress(d.status));
   const healthLabel = health?.status ?? (liveRow ? "unknown" : "stopped");
   const productionLabel = liveRow ? (running ? "Live" : healthLabel) : "Offline";
@@ -452,8 +486,8 @@ export default function ApplicationPage() {
                   >
                     View details
                   </button>
-                  {latest.status === "live" && latest.public_url ? (
-                    <a className="btn btn-ghost" href={latest.public_url} target="_blank" rel="noreferrer">
+                  {latest.status === "live" && (visitURL || latest.public_url) ? (
+                    <a className="btn btn-ghost" href={visitURL || latest.public_url} target="_blank" rel="noreferrer">
                       Open app
                     </a>
                   ) : null}
@@ -561,7 +595,10 @@ export default function ApplicationPage() {
             </button>
           </div>
           <p className="hint" style={{ marginTop: "0.45rem" }}>
-            Applied on the next deploy. PORT and reserved Forge keys are rejected.
+            Applied on the next deploy. Vite, Next.js, and CRA public keys (VITE_*,
+            NEXT_PUBLIC_*, REACT_APP_*) are baked in at build time — changing them
+            requires a new deploy, not just a running container. PORT and reserved
+            Forge keys are rejected.
           </p>
           {env.length === 0 ? (
             <p className="empty" style={{ marginTop: "0.85rem" }}>
@@ -612,17 +649,69 @@ export default function ApplicationPage() {
               </button>
             </div>
           </form>
-          <form onSubmit={onEnvBulk} style={{ marginTop: "1.1rem" }}>
-            <label htmlFor="env-bulk">Replace all (KEY=VALUE, one per line)</label>
+          <form
+            className="env-import"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void applyEnvFile("merge");
+            }}
+          >
+            <label htmlFor="env-bulk">Import a .env file</label>
+            <p className="hint" style={{ marginTop: "0.35rem" }}>
+              Upload a file or paste the whole contents. Comments, quotes, and
+              <code> export KEY=value</code> lines are accepted. Import keeps existing
+              keys and overwrites matches. Replace all drops keys that are not in the file.
+            </p>
+            <div className="actions-row" style={{ margin: "0.65rem 0" }}>
+              <label className="btn btn-ghost env-file-btn">
+                {envFileName ? envFileName : "Choose .env file"}
+                <input
+                  type="file"
+                  accept=".env,.env.*,text/plain"
+                  onChange={(e) => {
+                    void onEnvFile(e.target.files?.[0]);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
             <textarea
               id="env-bulk"
               value={envBulk}
-              onChange={(e) => setEnvBulk(e.target.value)}
-              placeholder={"GREETING=hello\nDEBUG=1"}
+              onChange={(e) => {
+                setEnvBulk(e.target.value);
+                if (envFileName) {
+                  setEnvFileName("");
+                }
+              }}
+              placeholder={'VITE_APP_EMAILJS_PUBLIC_KEY=...\nDATABASE_URL="postgres://..."\n# comments are ignored'}
+              aria-label="dotenv file contents"
             />
+            {envBulk.trim() ? (
+              <p className="env-preview">
+                {envParsed.vars.length === 0
+                  ? "No variables detected yet."
+                  : `Detected ${envParsed.vars.length} variable${envParsed.vars.length === 1 ? "" : "s"}: ${envParsed.vars.map((v) => v.key).join(", ")}`}
+                {envParsed.skipped.length > 0 ? (
+                  <>
+                    <br />
+                    Skipped: {envParsed.skipped.slice(0, 6).join("; ")}
+                    {envParsed.skipped.length > 6 ? "…" : ""}
+                  </>
+                ) : null}
+              </p>
+            ) : null}
             <div className="actions-row" style={{ marginTop: "0.65rem" }}>
-              <button className="btn-ghost" type="submit" disabled={!!busy}>
-                {busy === "envbulk" ? "Replacing…" : "Replace environment"}
+              <button className="btn-primary" type="submit" disabled={!!busy || envParsed.vars.length === 0}>
+                {busy === "envbulk" ? "Saving…" : "Import variables"}
+              </button>
+              <button
+                className="btn-ghost"
+                type="button"
+                disabled={!!busy || envParsed.vars.length === 0}
+                onClick={() => void applyEnvFile("replace")}
+              >
+                Replace all
               </button>
             </div>
           </form>
@@ -633,8 +722,10 @@ export default function ApplicationPage() {
         <form className="card" onSubmit={onSave}>
           <h2>Settings</h2>
           <p className="hint" style={{ marginTop: 0 }}>
-            These change the next deploy, not the currently running app. Local host is an optional
-            slug on port 9080.
+            These change the next deploy, not the currently running app. A local host slug is
+            optional — unnamed apps still deploy. Forge assigns a Host URL from the application
+            name when the slug is empty. Health path should be a route that returns 2xx (APIs
+            that 404 on / need something like /api/customers).
           </p>
           <div className="form-grid">
             <div>
@@ -740,6 +831,32 @@ function DeploymentDetail({
         ))}
       </div>
       {d.error_message ? <div className="err-box">{d.error_message}</div> : null}
+      <dl className="runtime-meta">
+        <div>
+          <dt>Container</dt>
+          <dd>{d.container_name || "—"}</dd>
+        </div>
+        <div>
+          <dt>Image</dt>
+          <dd>{d.image_name || "—"}</dd>
+        </div>
+        <div>
+          <dt>Runtime</dt>
+          <dd>{d.runtime_type || d.runtime_kind || "—"}</dd>
+        </div>
+        <div>
+          <dt>Application port</dt>
+          <dd>{d.listen_port || "—"}</dd>
+        </div>
+        <div>
+          <dt>Published port</dt>
+          <dd>{d.host_port || "—"}</dd>
+        </div>
+        <div>
+          <dt>Port source</dt>
+          <dd>{d.port_source || "—"}</dd>
+        </div>
+      </dl>
       {d.build_log ? (
         <>
           <h2 className="section-gap">Build log</h2>

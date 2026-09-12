@@ -56,8 +56,12 @@ type Deployment struct {
 	FailedStage   string
 	ErrorMessage  string
 	RuntimeKind   string
+	RuntimeType   string
+	PortSource    string
 	HostPort      int
+	ListenPort    int
 	ContainerID   string
+	ContainerName string
 	PublicURL     string
 	ImageName     string
 	BuildLog      string
@@ -87,7 +91,7 @@ func (d Deployment) DurationMS() int64 {
 	return ms
 }
 
-const maxErrorMessageLen = 500
+const maxErrorMessageLen = 4000
 
 // SanitizeErrorMessage trims and caps worker errors for storage.
 // Do not put connection strings or clone URLs with userinfo here.
@@ -183,6 +187,23 @@ func (p *Postgres) ListDeploymentsByApplication(ctx context.Context, application
 }
 
 // ListLiveDeployments is the Caddy input: every currently routed app.
+// ListInterruptedDeployments is every pipeline row past queued.
+//
+// Queued still has a Redis job the worker can run. Detecting/building/…
+// means the previous process already dequeued the job and died; those
+// rows block Deploy until they are failed.
+func (p *Postgres) ListInterruptedDeployments(ctx context.Context) ([]Deployment, error) {
+	rows, err := p.db.QueryContext(ctx, deploymentSelect+`
+		WHERE d.status IN ('detecting','building','provisioning','deploying','health_check')
+		ORDER BY d.created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list in-progress deployments: %w", err)
+	}
+	defer rows.Close()
+	return scanDeployments(rows)
+}
+
 func (p *Postgres) ListLiveDeployments(ctx context.Context) ([]Deployment, error) {
 	rows, err := p.db.QueryContext(ctx, deploymentSelect+`
 		WHERE d.status = $1
@@ -218,9 +239,13 @@ func (p *Postgres) UpdateDeployment(ctx context.Context, d Deployment) error {
 			public_url = NULLIF($8, ''),
 			image_name = COALESCE(NULLIF($9, ''), image_name),
 			build_log = CASE WHEN $10 <> '' THEN $10 ELSE build_log END,
+			container_name = COALESCE(NULLIF($11, ''), container_name),
+			listen_port = COALESCE(NULLIF($12, 0), listen_port),
+			runtime_type = COALESCE(NULLIF($13, ''), runtime_type),
+			port_source = COALESCE(NULLIF($14, ''), port_source),
 			updated_at = now()
 		WHERE id = $1::uuid
-	`, id, d.Status, d.FailedStage, d.ErrorMessage, d.RuntimeKind, d.HostPort, d.ContainerID, d.PublicURL, d.ImageName, d.BuildLog)
+	`, id, d.Status, d.FailedStage, d.ErrorMessage, d.RuntimeKind, d.HostPort, d.ContainerID, d.PublicURL, d.ImageName, d.BuildLog, d.ContainerName, d.ListenPort, d.RuntimeType, d.PortSource)
 	if err != nil {
 		return fmt.Errorf("update deployment: %w", err)
 	}
@@ -232,7 +257,9 @@ const deploymentReturning = `
 	COALESCE(error_message, ''), COALESCE(runtime_kind, ''),
 	COALESCE(host_port, 0), COALESCE(container_id, ''),
 	COALESCE(public_url, ''), COALESCE(image_name, ''), COALESCE(build_log, ''),
-	COALESCE(rollback_of::text, ''), created_at, updated_at
+	COALESCE(rollback_of::text, ''), created_at, updated_at,
+	COALESCE(container_name, ''), COALESCE(listen_port, 0),
+	COALESCE(runtime_type, ''), COALESCE(port_source, '')
 `
 
 const deploymentSelect = `
@@ -242,6 +269,8 @@ const deploymentSelect = `
 	       COALESCE(d.container_id, ''), COALESCE(d.public_url, ''),
 	       COALESCE(d.image_name, ''), COALESCE(d.build_log, ''),
 	       COALESCE(d.rollback_of::text, ''), d.created_at, d.updated_at,
+	       COALESCE(d.container_name, ''), COALESCE(d.listen_port, 0),
+	       COALESCE(d.runtime_type, ''), COALESCE(d.port_source, ''),
 	       COALESCE(a.local_host, '')
 	FROM deployments d
 	JOIN applications a ON a.id = d.application_id
@@ -291,9 +320,51 @@ func deploymentInsertDest(d *Deployment) []any {
 		&d.ID, &d.ProjectID, &d.ApplicationID, &d.Status, &d.FailedStage, &d.ErrorMessage,
 		&d.RuntimeKind, &d.HostPort, &d.ContainerID, &d.PublicURL, &d.ImageName, &d.BuildLog,
 		&d.RollbackOf, &d.CreatedAt, &d.UpdatedAt,
+		&d.ContainerName, &d.ListenPort, &d.RuntimeType, &d.PortSource,
 	}
 }
 
 func deploymentSelectDest(d *Deployment) []any {
 	return append(deploymentInsertDest(d), &d.LocalHost)
+}
+
+// CountInProgressByOwner is the Phase 5 deploy-concurrency quota.
+func (p *Postgres) CountInProgressByOwner(ctx context.Context, ownerID string) (int, error) {
+	ownerID, err := ParseUUID(ownerID)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = p.db.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM deployments d
+		JOIN applications a ON a.id = d.application_id
+		JOIN projects p ON p.id = a.project_id
+		WHERE p.owner_id = $1::uuid
+		  AND d.status IN ('queued','detecting','building','provisioning','deploying','health_check')
+	`, ownerID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count in-progress deploys: %w", err)
+	}
+	return n, nil
+}
+
+// PruneOldBuildLogs clears build_log on terminal rows older than age.
+// Retention is a quota, not a legal archive. Values are already sanitized.
+func (p *Postgres) PruneOldBuildLogs(ctx context.Context, age time.Duration) (int64, error) {
+	if age <= 0 {
+		return 0, nil
+	}
+	res, err := p.db.ExecContext(ctx, `
+		UPDATE deployments
+		SET build_log = ''
+		WHERE build_log <> ''
+		  AND status IN ('live','failed','stopped')
+		  AND updated_at < now() - $1::interval
+	`, fmt.Sprintf("%d seconds", int(age.Seconds())))
+	if err != nil {
+		return 0, fmt.Errorf("prune build logs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }

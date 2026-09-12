@@ -9,6 +9,9 @@ func TestValidateEnvPairRejectsReserved(t *testing.T) {
 	if err := validateEnvPair(EnvPair{Key: "PORT", Value: "9"}); err == nil {
 		t.Fatal("PORT")
 	}
+	if err := validateEnvPair(EnvPair{Key: "HOST", Value: "1"}); err == nil {
+		t.Fatal("HOST")
+	}
 	if err := validateEnvPair(EnvPair{Key: "FORGE_X", Value: "1"}); err == nil {
 		t.Fatal("FORGE_")
 	}
@@ -45,7 +48,7 @@ func TestDockerLogsFollowArgs(t *testing.T) {
 }
 
 func TestDockerRunArgsDropCapabilities(t *testing.T) {
-	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil)
+	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080)
 	if err != nil {
 		t.Fatal(err)
 	}

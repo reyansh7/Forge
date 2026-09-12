@@ -6,3 +6,8 @@
 :80 {
 	respond "Forge proxy: no live deployment at this path" 404
 }
+
+:443 {
+	tls internal
+	respond "Forge proxy: no live deployment at this path" 404
+}

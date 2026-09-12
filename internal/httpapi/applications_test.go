@@ -315,6 +315,48 @@ func TestApplicationLogsNeedLive(t *testing.T) {
 	}
 }
 
+func TestStopCancelsBuilding(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          "app",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	d, err := deps.CreateDeployment(context.Background(), app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Status = store.StatusBuilding
+	_ = deps.UpdateDeployment(context.Background(), d)
+
+	srv := appServer(mem, apps, deps)
+	srv.Runtime = &stubRuntime{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/stop", nil)
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := deps.GetDeployment(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusFailed || got.FailedStage != string(store.StatusBuilding) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestStopApplication(t *testing.T) {
 	mem := newMemProjects()
 	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{

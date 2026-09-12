@@ -3,7 +3,7 @@ package store
 import "testing"
 
 func TestValidateEnvKeyRejectsReserved(t *testing.T) {
-	cases := []string{"", "PORT", "port", "FORGE_SECRET", "1ABC", "HAS-DASH", "HAS SPACE"}
+	cases := []string{"", "PORT", "port", "HOST", "FORGE_SECRET", "1ABC", "HAS-DASH", "HAS SPACE"}
 	for _, key := range cases {
 		if err := ValidateEnvKey(key); err == nil {
 			t.Fatalf("expected error for %q", key)

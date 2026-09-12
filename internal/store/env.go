@@ -10,12 +10,11 @@ import (
 
 // EnvVar is one operator-supplied environment binding for an application.
 //
-// Values are persisted in PostgreSQL. This is operator metadata, not a
-// vault: the table is readable to anyone with the database URL, values
-// are not encrypted at rest by Forge, and a SELECT dumps every secret.
-// Dedicated secret management (encryption, rotation, lease) is a later
-// phase. Never log Value. Audit events may record the key name only.
-// The worker injects pairs as docker -e.
+// Values are persisted in PostgreSQL. Phase 5 seals them with AES-GCM
+// when Postgres.crypter is set. A SELECT of the table then shows
+// enc:v1:... not the plaintext. Anyone with the data key or a live
+// process can still decrypt — this is encrypted-at-rest, not a vault.
+// Never log Value. Audit events may record the key name only.
 type EnvVar struct {
 	Key   string
 	Value string
@@ -38,8 +37,8 @@ func ValidateEnvKey(key string) error {
 	if !envKeyPattern.MatchString(key) {
 		return fmt.Errorf("env key must be a shell identifier")
 	}
-	if strings.EqualFold(key, "PORT") {
-		return fmt.Errorf("PORT is reserved by Forge")
+	if strings.EqualFold(key, "PORT") || strings.EqualFold(key, "HOST") {
+		return fmt.Errorf("%s is reserved by Forge", strings.ToUpper(key))
 	}
 	if strings.HasPrefix(strings.ToUpper(key), "FORGE_") {
 		return fmt.Errorf("FORGE_ keys are reserved")
@@ -78,6 +77,11 @@ func (p *Postgres) ListEnvVars(ctx context.Context, applicationID string) ([]Env
 		if err := rows.Scan(&item.Key, &item.Value); err != nil {
 			return nil, fmt.Errorf("scan env: %w", err)
 		}
+		plain, err := p.crypter.Open(item.Value)
+		if err != nil {
+			return nil, fmt.Errorf("open env %s: %w", item.Key, err)
+		}
+		item.Value = plain
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -115,12 +119,16 @@ func (p *Postgres) PutEnvVar(ctx context.Context, applicationID, key, value stri
 		return fmt.Errorf("at most %d environment variables per application", maxEnvVars)
 	}
 
+	stored, err := p.crypter.Seal(value)
+	if err != nil {
+		return fmt.Errorf("seal env: %w", err)
+	}
 	_, err = p.db.ExecContext(ctx, `
 		INSERT INTO application_env_vars (application_id, key, value)
 		VALUES ($1::uuid, $2, $3)
 		ON CONFLICT (application_id, key)
 		DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-	`, applicationID, key, value)
+	`, applicationID, key, stored)
 	if err != nil {
 		return fmt.Errorf("put env: %w", err)
 	}
@@ -189,10 +197,14 @@ func (p *Postgres) ReplaceEnvVars(ctx context.Context, applicationID string, var
 		return fmt.Errorf("clear env: %w", err)
 	}
 	for _, ev := range clean {
+		stored, err := p.crypter.Seal(ev.Value)
+		if err != nil {
+			return fmt.Errorf("seal env: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO application_env_vars (application_id, key, value)
 			VALUES ($1::uuid, $2, $3)
-		`, applicationID, ev.Key, ev.Value); err != nil {
+		`, applicationID, ev.Key, stored); err != nil {
 			return fmt.Errorf("insert env: %w", err)
 		}
 	}

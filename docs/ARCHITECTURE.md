@@ -166,7 +166,7 @@ Initial responsibilities include:
 
 The dashboard communicates with the Go API rather than directly controlling infrastructure.
 
-**Current use (Phase 4):** `web/` is a Next.js App Router UI on `127.0.0.1:3000` with a black/red theme. `/login` asks for Sign in first (name + password). A link opens Sign up (name + password + confirm). Each login replaces the `forge_session` cookie and revokes the previous session so two operators do not share a live cookie in the same browser. Subsequent API calls send credentials (cookie) and, after login, a bearer token. It lists projects and applications the operator owns, manages env vars (including bulk replace), application settings (`root_directory`, `health_path`, `local_host`), queues deployments and rollbacks, polls status, streams runtime logs over SSE (snapshots remain), shows persisted `build_log` and `duration_ms`, and can stop a live app. `/observe` shows authorized metrics. Browser calls go to `/forge-api/*`, which Next.js rewrites to the Go API (the log stream has a dedicated App Router proxy so follow is not buffered). The dashboard does not talk to Docker, Redis, or Caddy. Tracing and alerts are later phases.
+**Current use (Phase 4):** `web/` is a Next.js App Router UI on `127.0.0.1:3000` with a black/red theme. `/login` asks for Sign in first (name + password). A link opens Sign up (name + password + confirm). Each login replaces the `forge_session` cookie and revokes the previous session so two operators do not share a live cookie in the same browser. Subsequent API calls send credentials (cookie) and, after login, a bearer token. It lists projects and applications the operator owns, manages env vars (including .env paste/upload and bulk replace), application settings (`root_directory`, `health_path`, `local_host`), queues deployments and rollbacks, polls status, streams runtime logs over SSE (snapshots remain), shows persisted `build_log` and `duration_ms`, and can stop a live app or cancel an in-progress deploy. `/observe` shows authorized metrics. Browser calls go to `/forge-api/*`, which Next.js rewrites to the Go API (the log stream has a dedicated App Router proxy so follow is not buffered). The dashboard does not talk to Docker, Redis, or Caddy. Tracing and alerts are later phases.
 
 ### 4.3 PostgreSQL
 
@@ -190,7 +190,7 @@ Redis must not become the source of truth for durable state.
 
 The exact schema must be designed incrementally during the appropriate implementation phase.
 
-**Current schema (Phase 3):** `schema_migrations`; `users` (bcrypt `password_hash`); `sessions` (`token_hash` is SHA-256 of the bearer/cookie, never the raw token); `audit_events` (no env values or passwords); `projects` (`owner_id` → users); `applications` (`id`, `project_id`, `name`, `repository_url`, `root_directory`, `health_path`, `local_host`, timestamps, unique `(project_id, name)`, unique non-empty `local_host`); `application_env_vars`; `deployments` (`id`, `project_id`, `application_id`, `status`, `failed_stage`, `error_message`, `runtime_kind`, `host_port`, `container_id`, `public_url`, `image_name`, `build_log`, `rollback_of`, timestamps). A project is a folder owned by one operator. An application is the deployable unit. Creating a project also inserts a default application named `app` with the same repository URL. Status values include `stopped`. Two apps in one project may both be LIVE; **one application has at most one LIVE deployment** (unique index). The API refuses Deploy or Rollback while that container is still running. `root_directory` is a relative path inside the clone (default `.`); the worker confines it so `..` cannot escape the fetch tree. `health_path` is an HTTP path on loopback (default `/`). `local_host` is an optional `.localhost` slug routed by Caddy in addition to `/d/{id}/` — not public DNS and not TLS. `image_name` / `build_log` are worker-written artifacts for history and rollback. Env values are operator metadata in Postgres, not a secret manager (dedicated secret management is a Phase 5 roadmap item). Storing a URL does not execute it; the worker fetches only after a deploy job. Rollback copies `image_name` from a prior row and skips fetch/build. List/Get/mutate of a project (and its apps, env, deployments, logs) require a session whose user id equals `projects.owner_id`. A UUID in the URL is not authorization; wrong owner is 404.
+**Current schema (Phase 3):** `schema_migrations`; `users` (bcrypt `password_hash`); `sessions` (`token_hash` is SHA-256 of the bearer/cookie, never the raw token); `audit_events` (no env values or passwords); `projects` (`owner_id` → users); `applications` (`id`, `project_id`, `name`, `repository_url`, `root_directory`, `health_path`, `local_host`, timestamps, unique `(project_id, name)`, unique non-empty `local_host`); `application_env_vars`; `deployments` (`id`, `project_id`, `application_id`, `status`, `failed_stage`, `error_message`, `runtime_kind`, `runtime_type`, `port_source`, `host_port`, `listen_port`, `container_id`, `container_name`, `public_url`, `image_name`, `build_log`, `rollback_of`, timestamps). A project is a folder owned by one operator. An application is the deployable unit. Creating a project also inserts a default application named `app` with the same repository URL. Status values include `stopped`. Two apps in one project may both be LIVE; **one application has at most one LIVE deployment** (unique index). The API refuses Deploy or Rollback while that container is still running. `root_directory` is a relative path inside the clone (default `.`); the worker confines it so `..` cannot escape the fetch tree. `health_path` is an HTTP path on loopback (default `/`). `local_host` is an optional `.localhost` slug routed by Caddy in addition to `/d/{id}/` — not public DNS. App HTTPS is Caddy `tls internal` on `127.0.0.1:9443` (local CA). `image_name` / `build_log` are worker-written artifacts for history and rollback. Env values are operator metadata in Postgres, sealed at rest with AES-256-GCM (`enc:v1:`) when the process has a data key — encrypted-at-rest, not a vault. Storing a URL does not execute it; the worker fetches only after a deploy job. Rollback copies `image_name` from a prior row and skips fetch/build. List/Get/mutate of a project (and its apps, env, deployments, logs) require a session whose user id equals `projects.owner_id`. A UUID in the URL is not authorization; wrong owner is 404.
 
 ### 4.4 Redis
 
@@ -205,7 +205,7 @@ Initial responsibilities may include:
 
 Redis should not replace PostgreSQL as the durable source of truth.
 
-**Current use (Phase 1):** a Redis LIST (`forge:jobs`) is transient job transport. The API `RPUSH`es `example` or `deploy` jobs; `cmd/worker` `BLPOP`s them. Job *status* lives in `deployments` (PostgreSQL). A Redis restart can still drop queued jobs that were never popped. The LIST is not a durable workflow engine.
+**Current use (Phase 5):** a Redis LIST (`forge:jobs`) is transient job transport. The API `RPUSH`es `example` or `deploy` jobs; `cmd/worker` `BLPOP`s them. Job *status* lives in `deployments` (PostgreSQL). A Redis restart drops queued jobs that were never popped; restore of Postgres does not replay the LIST — re-enqueue those rows. The LIST is not a durable workflow engine. See `docs/DISASTER_RECOVERY.md`.
 
 ### 4.5 Worker
 
@@ -257,7 +257,7 @@ Artifact
 
 Build execution is considered untrusted execution and must have an explicit isolation boundary.
 
-**Current use (Phase 2):** detect is file presence (`Dockerfile`, `go.mod`, `package.json`) under the confined `root_directory`. `docker build` runs on the worker host; npm/go from the repo run only inside that build. Forge writes a Dockerfile for node/go when the repo has none. Combined build output is stored on the deployment as `build_log` (capped). Rollback does not rebuild.
+**Current use:** detect is a pack registry under the confined `root_directory` (manifests, Dockerfiles, and shallow source layout; never host exec). Images, video, fonts, and other assets are ignored for classification and remain in `COPY . .` when a strategy exists. A valid user `Dockerfile` always wins. Without one, packs match language manifests and then choose a **build strategy** and a **runtime strategy**. `npm run build` is not treated as an HTTP server: Vite/CRA/Vue/Svelte frontends without a production `start` become `runtime=static` (Node build stage + Forge-owned nginx). A root `index.html` with no language manifest is the same static runtime. Server starts still come from `package.json` `start` (not `next dev` / `vite`), `Cargo.toml` / `.csproj` names, Maven/Gradle, unique Django `*/wsgi.py`, unique FastAPI/Flask modules, `config/puma.rb`, a `Procfile` `web:` process, or `forge.json` `start`. Dev servers (`runserver`, `flask run`, `php -S`, `next dev`, `vite preview`) are not chosen automatically. Hardcoded `listen(5000)` in a conventional entry file is used as the container port when the process does not read `$PORT`. `forge.json` may also set `health`, `runtime`, and `output`. If start cannot be determined safely, detect fails early with the detected files and a suggested fix. `runtime_kind` is the pack ID; `runtime_type` is `server`, `static`, or `image`. Rollback does not rebuild.
 
 ### 4.7 Runtime
 
@@ -278,7 +278,7 @@ A deployed application should conceptually have:
 
 The runtime must not share unrestricted control-plane privileges.
 
-**Current use (Phase 4):** `docker run` publishes `127.0.0.1:{port}:8080` with memory/CPU/pids limits, `no-new-privileges`, `--cap-drop ALL`, a `tmpfs` `/tmp`, and `--pull never`. Operator env vars are passed as `-e KEY=VALUE` after key/value validation; `PORT=8080` is applied last so Forge owns the listen port. `PORT` and `FORGE_*` keys are rejected. No Docker socket mount, no `--privileged`. `docker build` does not use host network or the Docker socket; it can still pull public base images (supply-chain review is on the operator — scanners are not a substitute for isolation). The worker HTTP-probes `GET http://127.0.0.1:{port}{health_path}` once at go-live. After LIVE, dashboard `/applications/{id}/health` uses `docker inspect` (container running) so polling does not flood the app's access logs. Runtime logs are a `docker logs -t --tail` snapshot plus an authorized SSE follow (`docker logs -f`). Build output is on the deployment row. Disk quotas, tenant network policies, and autoscaling are not current.
+**Current use (Phase 4):** `docker run` publishes `127.0.0.1:{host}:{listen}` where `listen` is the detected application port (not always 8080). Isolation is unchanged: memory/CPU/pids limits, `no-new-privileges`, `--cap-drop ALL`, a `tmpfs` `/tmp`, and `--pull never`. Operator env vars are written into `.env.production.local` and passed as `docker build --build-arg` so Vite/Next/CRA public keys (`VITE_*`, `NEXT_PUBLIC_*`, `REACT_APP_*`) are inlined at compile time; the same keys are passed again as `-e KEY=VALUE` at `docker run` for server processes. `HOST=0.0.0.0` and `PORT=<listen>` are applied last at run. `PORT`, `HOST`, and `FORGE_*` keys are rejected. Values must not be copied into `build_log`. Containers are named `<app-slug>-<short-id>` (legacy rows still resolve as `forge-run-<uuid>`). No Docker socket mount, no `--privileged`. After `docker run` the worker inspects the container: an immediate exit is FAILED at deploying with logs, not a health timeout. The go-live probe classifies connection refused, HTTP status (404 fails immediately), and dead processes. After LIVE, dashboard `/applications/{id}/health` uses `docker inspect` (container running) so polling does not flood the app's access logs. Runtime logs are a `docker logs -t --tail` snapshot plus an authorized SSE follow (`docker logs -f`). Build output includes `[detect]` strategy lines. Phase 5 adds a fetched-workspace disk cap (`FORGE_WORKSPACE_MAX_BYTES`), per-owner project and in-flight deploy quotas, and build-log retention prune. Tenant network policies and autoscaling are not current.
 
 ### 4.8 Reverse Proxy
 
@@ -300,7 +300,7 @@ Caddy should not be responsible for application orchestration.
 
 The control plane determines deployment/runtime state; the reverse proxy handles request routing.
 
-**Current use (Phase 2):** Caddy runs in Compose, published on `127.0.0.1:9080` (HTTP) and `127.0.0.1:2019` (admin). The worker (and the API on stop) POST a generated Caddyfile to `/load`. Live apps are reached at `http://127.0.0.1:9080/d/{deployment_id}/` and, if `local_host` is set, `http://{slug}.localhost:9080/`. That slug is local DX, not a public custom domain. App containers publish only on `127.0.0.1:{port}`; Caddy reaches them via `host.docker.internal`. Admin must stay loopback — it can rewrite every route.
+**Current use (Phase 5):** Caddy runs in Compose, published on `127.0.0.1:9080` (HTTP), `127.0.0.1:9443` (HTTPS, `tls internal`), and `127.0.0.1:2019` (admin). `auto_https` stays off — ACME needs a public hostname (Phase 7). The worker (and the API on stop) POST a generated Caddyfile to `/load`. Live apps are reached at `http://127.0.0.1:9080/d/{deployment_id}/` (and `https://127.0.0.1:9443/d/{deployment_id}/` if the client trusts Caddy’s local CA) and at `http://{slug}.localhost:9080/`. The operator slug is optional; if empty, the worker derives one from the application name so Host routing still exists. Path URLs strip `/d/{id}` (`handle_path`). Vite/CRA default builds request `/assets/*` from the origin root, so Caddy also proxies those GETs when `Referer` contains `/d/{id}/`, and Forge builds Vite with `--base ./`. Prefer the `.localhost` Host URL for SPAs. The slug is local DX, not a public custom domain. App containers publish only on `127.0.0.1:{port}`; Caddy reaches them via `host.docker.internal`. Admin must stay loopback — it can rewrite every route. Failed health checks Stop/rm the attempt’s container; image and logs stay on the deployment row.
 
 ---
 
@@ -384,7 +384,7 @@ Important principles:
 
 **No host execution** — user-provided commands must never simply be passed to a host shell.
 
-**Resource limits** — user workloads must have limits. **Current:** memory, CPU, pids, capability drop, tmpfs `/tmp`, loopback publish. **Future (roadmap):** disk, deploy concurrency, retention, and tenant quotas (Phase 5+).
+**Resource limits** — user workloads must have limits. **Current:** memory, CPU, pids, capability drop, tmpfs `/tmp`, loopback publish, fetched-workspace disk cap, per-owner project and in-flight deploy quotas, build-log retention. **Future (roadmap):** tenant network policy and autoscaling (Phase 6+).
 
 **Network isolation** — user workloads must not automatically receive unrestricted access to internal infrastructure. **Current:** published ports are loopback; Caddy admin is loopback; workloads do not get the Docker socket or `--network host`. **Future:** explicit tenant network policy (Phase 6+).
 
@@ -395,9 +395,9 @@ Important principles:
 - exposed to unrelated workloads
 - unnecessarily available to build processes
 
-Postgres env vars are **not** a secret manager.
+Postgres env vars are **not** a secret manager. Phase 5 seals cells with AES-256-GCM (`enc:v1:`) using `.forge/data.key` or `FORGE_DATA_KEY`. The API and worker must share that key. Losing the key loses readable env. Do not log the key or dump files.
 
-**Authentication and authorization** — every control-plane operation that affects resources must be authorized. **Current:** loopback bind plus operator sessions (`POST /auth/bootstrap` or `POST /auth/signup`, then `POST /auth/login`). A new session replaces the `forge_session` cookie and revokes the previous token from that browser. Mutating and data-leaking routes require a valid session. Projects are scoped by `owner_id`; another operator's UUID is 404, not 200. `GET /health` stays public for Compose/process checks. The API is still bound to `127.0.0.1` — auth is not permission to publish on `0.0.0.0`. Team RBAC is a later phase.
+**Authentication and authorization** — every control-plane operation that affects resources must be authorized. **Current:** loopback bind plus operator sessions (`POST /auth/bootstrap` or `POST /auth/signup`, then `POST /auth/login`). A new session replaces the `forge_session` cookie and revokes the previous token from that browser. Mutating and data-leaking routes require a valid session. Projects are scoped by `owner_id`; another operator's UUID is 404, not 200. `GET /health` stays public for Compose/process checks. Binding every interface requires `FORGE_ALLOW_PUBLIC_BIND=1`; auth is still required and TLS is recommended. Team RBAC is a later phase.
 
 **Auditability** — security-sensitive control-plane actions write `audit_events` (bootstrap, login, project/app/env/deploy/stop/rollback). Metadata must not include env values, passwords, or session tokens.
 
@@ -427,7 +427,7 @@ Applications should not need to expose their internal ports directly to the publ
 
 The reverse proxy is the public entry point.
 
-**Current:** Caddy is published on `127.0.0.1:9080` only. “Internet” in this diagram is not the present bind.
+**Current:** Caddy is published on `127.0.0.1:9080` (HTTP) and `127.0.0.1:9443` (HTTPS, local CA). “Internet” in this diagram is not the present bind.
 
 Internal service communication should be explicit and controlled.
 
@@ -574,11 +574,11 @@ Future phases must extend these **roles**, not collapse them into a vendor SDK.
 
 **Reliable deployment state machine** — named statuses, persisted failures, image rollback as a first-class transition. Advanced strategies add states; they do not delete the machine.
 
-**Rollback / recovery** — current: reuse `image_name`. Future: backups (Phase 5), node failover (Phase 6+), multi-region DR (Phase 10).
+**Rollback / recovery** — current: reuse `image_name`; PostgreSQL dump/restore via `cmd/backup` (`docs/DISASTER_RECOVERY.md`). Future: node failover (Phase 6+), multi-region DR (Phase 10).
 
 **Observability** — structured control-plane logs, authorized SSE runtime follow, and session-gated `/metrics`. Tracing and alerts are later. Telemetry must not become a secret leak.
 
-**High availability and disaster recovery** — design so Postgres remains source of truth and queue loss is survivable (jobs may drop today; that is documented). HA is not current.
+**High availability and disaster recovery** — Postgres remains source of truth; queue loss is survivable and documented. Single-node backup/restore is current. Multi-node HA is not.
 
 Do not design every future subsystem at implementation detail in this file. Prefer a named interface and a later increment.
 

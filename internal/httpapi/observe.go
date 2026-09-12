@@ -114,7 +114,7 @@ func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
 				out.DeploymentsLive++
 				if s.Runtime != nil && out.ContainersChecked < 20 {
 					out.ContainersChecked++
-					ok, runErr := s.Runtime.Running(ctx, runtime.ContainerName(d.ID))
+					ok, runErr := s.Runtime.Running(ctx, runtime.ResolveContainerName(d.ID, d.ContainerName))
 					if runErr == nil && ok {
 						out.ContainersRunning++
 					}
@@ -217,7 +217,7 @@ func (s *Server) streamApplicationLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	err = s.Runtime.FollowLogs(streamCtx, runtime.ContainerName(live.ID), tail, func(line string) error {
+	err = s.Runtime.FollowLogs(streamCtx, runtime.ResolveContainerName(live.ID, live.ContainerName), tail, func(line string) error {
 		return writeEvent(logLineEvent{Line: line, DeploymentID: live.ID})
 	})
 	if err != nil && streamCtx.Err() == nil {

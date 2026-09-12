@@ -107,11 +107,32 @@ func (m *memDeployments) ListLiveDeployments(context.Context) ([]store.Deploymen
 	return out, nil
 }
 
+func (m *memDeployments) CountInProgressByOwner(_ context.Context, _ string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, d := range m.byID {
+		if d.Status.InProgress() {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *memDeployments) UpdateDeployment(_ context.Context, d store.Deployment) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.byID[d.ID] = d
 	return nil
+}
+
+func (m *memDeployments) markAllFailed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, d := range m.byID {
+		d.Status = store.StatusFailed
+		m.byID[id] = d
+	}
 }
 
 func deployServer(projects ProjectStore, apps ApplicationStore, deps DeploymentStore, jobs JobQueue) *Server {
@@ -161,6 +182,80 @@ func TestCreateDeploymentAccepted(t *testing.T) {
 	}
 	if _, ok := payload["command"]; ok {
 		t.Fatal("command must not be in payload")
+	}
+}
+
+func TestDeployConcurrencyQuota(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          store.DefaultApplicationName,
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	if _, err := deps.CreateDeployment(context.Background(), app.ID); err != nil {
+		t.Fatal(err)
+	}
+	srv := deployServer(mem, apps, deps, &stubJobs{})
+	srv.Limits.MaxInflightDeploys = 1
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/projects/"+p.ID+"/deployments", bytes.NewReader([]byte(`{}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("deploy concurrency quota exceeded")) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestDeployRateLimit(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          store.DefaultApplicationName,
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	srv := deployServer(mem, apps, deps, &stubJobs{})
+	srv.Limits.MaxInflightDeploys = 20
+	srv.deployGate = newAttemptGate(2, time.Minute)
+
+	post := func() *httptest.ResponseRecorder {
+		deps.markAllFailed()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/deployments", bytes.NewReader([]byte(`{}`)))
+		testHandler(srv).ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := post(); rec.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := post(); rec.Code != http.StatusAccepted {
+		t.Fatalf("second status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := post(); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate-limit status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

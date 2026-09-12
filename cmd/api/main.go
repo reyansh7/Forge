@@ -21,6 +21,7 @@ import (
 	"github.com/reyansh7/Forge/internal/proxy"
 	"github.com/reyansh7/Forge/internal/queue"
 	"github.com/reyansh7/Forge/internal/runtime"
+	"github.com/reyansh7/Forge/internal/secrets"
 	"github.com/reyansh7/Forge/internal/store"
 )
 
@@ -67,6 +68,20 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	// AES-GCM box for application_env_vars. The worker must load the
+	// same key or docker -e would receive ciphertext. Never log the key.
+	box, err := secrets.LoadOrCreate(cfg.DataKeyFile, cfg.DataKey)
+	if err != nil {
+		return err
+	}
+	pg.SetCrypter(box)
+
+	if n, err := pg.PruneOldBuildLogs(ctx, time.Duration(cfg.LogRetentionDays)*24*time.Hour); err != nil {
+		log.Error("prune build logs failed", "err", err)
+	} else if n > 0 {
+		log.Info("pruned old build logs", "rows", n, "retention_days", cfg.LogRetentionDays)
+	}
+
 	rdb, err := store.NewRedisPinger(cfg.RedisURL)
 	if err != nil {
 		return err
@@ -80,16 +95,22 @@ func run(log *slog.Logger) error {
 	}
 
 	api := &httpapi.Server{
-		Log:         log,
-		Postgres:    pg,
-		Redis:       rdb,
-		Projects:    pg,
-		Apps:        pg,
-		Deployments: pg,
-		Jobs:        jobs,
-		Runtime:     runtime.HostDocker{},
-		Router:      proxy.Caddy{AdminURL: cfg.CaddyAdminURL, UpstreamHost: cfg.CaddyUpstreamHost},
-		Auth:        pg,
+		Log:           log,
+		Postgres:      pg,
+		Redis:         rdb,
+		Projects:      pg,
+		Apps:          pg,
+		Deployments:   pg,
+		Jobs:          jobs,
+		Runtime:       runtime.HostDocker{},
+		Router:        proxy.Caddy{AdminURL: cfg.CaddyAdminURL, UpstreamHost: cfg.CaddyUpstreamHost},
+		Auth:          pg,
+		Schemas:       pg,
+		SecureCookies: cfg.TLSEnabled(),
+		Limits: httpapi.Limits{
+			MaxProjectsPerOwner: cfg.MaxProjectsPerOwner,
+			MaxInflightDeploys:  cfg.MaxInflightDeploys,
+		},
 	}
 
 	srv := &http.Server{
@@ -105,7 +126,15 @@ func run(log *slog.Logger) error {
 	// means a send to errCh never blocks if we already left the select.
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("api listening", "addr", cfg.Addr)
+		// ListenAndServeTLS is opt-in (FORGE_TLS_* files). Default stays
+		// HTTP on loopback: a local dashboard rewrite does not need a
+		// cert. Binding 0.0.0.0 still requires FORGE_ALLOW_PUBLIC_BIND=1.
+		if cfg.TLSEnabled() {
+			log.Info("api listening", "addr", cfg.Addr, "tls", true)
+			errCh <- srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+			return
+		}
+		log.Info("api listening", "addr", cfg.Addr, "tls", false)
 		errCh <- srv.ListenAndServe()
 	}()
 

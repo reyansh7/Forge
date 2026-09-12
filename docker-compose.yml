@@ -45,13 +45,15 @@ services:
       timeout: 3s
       retries: 20
 
-  # Reverse proxy for LIVE user apps. Admin :2019 is loopback-only so a
-  # LAN client cannot rewrite routes. extra_hosts lets Caddy reach app
-  # ports published on the Windows/macOS Docker host.
+  # Reverse proxy for LIVE user apps. :9080 is HTTP, :9443 is HTTPS
+  # (Caddy tls internal). Admin :2019 is loopback-only so a LAN client
+  # cannot rewrite routes. extra_hosts lets Caddy reach app ports
+  # published on the Windows/macOS Docker host.
   caddy:
     image: caddy:2-alpine
     ports:
       - "127.0.0.1:9080:80"
+      - "127.0.0.1:9443:443"
       - "127.0.0.1:2019:2019"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro

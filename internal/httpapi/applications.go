@@ -308,7 +308,7 @@ func (s *Server) getApplicationLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no live deployment")
 		return
 	}
-	text, err := s.Runtime.Logs(ctx, runtime.ContainerName(live.ID), tail)
+	text, err := s.Runtime.Logs(ctx, runtime.ResolveContainerName(live.ID, live.ContainerName), tail)
 	if err != nil {
 		s.logger().Error("docker logs failed", "err", err)
 		writeError(w, http.StatusBadGateway, "failed to read logs")
@@ -352,7 +352,7 @@ func (s *Server) getApplicationHealth(w http.ResponseWriter, r *http.Request) {
 	// app's HTTP server, so operator logs stay the app's own traffic.
 	running := true
 	if s.Runtime != nil {
-		ok, runErr := s.Runtime.Running(ctx, runtime.ContainerName(live.ID))
+		ok, runErr := s.Runtime.Running(ctx, runtime.ResolveContainerName(live.ID, live.ContainerName))
 		if runErr != nil {
 			s.logger().Error("health: docker inspect failed", "err", runErr)
 			writeError(w, http.StatusBadGateway, "failed to check health")
@@ -379,21 +379,45 @@ func (s *Server) stopApplication(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	live, found, err := s.liveDeployment(ctx, app.ID)
+	if s.Deployments == nil {
+		writeError(w, http.StatusInternalServerError, "deployments are not configured")
+		return
+	}
+	list, err := s.Deployments.ListDeploymentsByApplication(ctx, app.ID)
 	if err != nil {
 		s.logger().Error("stop: list deployments failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to stop application")
 		return
 	}
-	if !found {
-		writeError(w, http.StatusConflict, "no live deployment")
+	// Stop must cancel BUILDING/QUEUED rows, not only LIVE. Killing the
+	// worker mid-build used to leave InProgress forever, which blocked
+	// the next Deploy.
+	var last store.Deployment
+	n := 0
+	for _, d := range list {
+		switch {
+		case d.Status == store.StatusLive:
+			s.haltLive(ctx, d, "stopped by operator")
+			d.Status = store.StatusStopped
+			d.ErrorMessage = store.SanitizeErrorMessage("stopped by operator")
+			last = d
+			n++
+		case d.Status.InProgress():
+			stage := string(d.Status)
+			s.abandonInProgress(ctx, d, "stopped by operator")
+			d.Status = store.StatusFailed
+			d.FailedStage = stage
+			d.ErrorMessage = store.SanitizeErrorMessage("stopped by operator")
+			last = d
+			n++
+		}
+	}
+	if n == 0 {
+		writeError(w, http.StatusConflict, "nothing to stop")
 		return
 	}
-	s.haltLive(ctx, live, "stopped by operator")
-	s.audit(r, "", "application.stop", "application", app.ID, map[string]string{"deployment_id": live.ID})
-	live.Status = store.StatusStopped
-	live.ErrorMessage = store.SanitizeErrorMessage("stopped by operator")
-	writeJSON(w, http.StatusOK, deploymentResponseFrom(live))
+	s.audit(r, "", "application.stop", "application", app.ID, map[string]string{"deployment_id": last.ID})
+	writeJSON(w, http.StatusOK, deploymentResponseFrom(last))
 }
 
 func (s *Server) listEnv(w http.ResponseWriter, r *http.Request) {
@@ -567,9 +591,24 @@ func (s *Server) liveDeployment(ctx context.Context, applicationID string) (stor
 	return store.Deployment{}, false, nil
 }
 
+func (s *Server) abandonInProgress(ctx context.Context, d store.Deployment, notice string) {
+	if s.Runtime != nil && (d.ContainerName != "" || d.ID != "") {
+		_ = s.Runtime.Stop(ctx, runtime.ResolveContainerName(d.ID, d.ContainerName))
+	}
+	stage := string(d.Status)
+	d.FailedStage = stage
+	d.Status = store.StatusFailed
+	d.ErrorMessage = store.SanitizeErrorMessage(notice)
+	persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if err := s.Deployments.UpdateDeployment(persist, d); err != nil {
+		s.logger().Error("persist abandoned deployment failed", "err", err)
+	}
+}
+
 func (s *Server) haltLive(ctx context.Context, live store.Deployment, notice string) {
 	if s.Runtime != nil && live.ID != "" {
-		_ = s.Runtime.Stop(ctx, runtime.ContainerName(live.ID))
+		_ = s.Runtime.Stop(ctx, runtime.ResolveContainerName(live.ID, live.ContainerName))
 	}
 	live.Status = store.StatusStopped
 	live.FailedStage = ""
