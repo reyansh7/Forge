@@ -12,8 +12,9 @@ func TestApplicationAndEnvAgainstPostgres(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	owner := operatorForTest(t, pg)
 	name := "p11-" + time.Now().UTC().Format("20060102T150405.000000000")
-	proj, err := pg.CreateProject(ctx, ProjectInput{
+	proj, err := pg.CreateProject(ctx, owner.ID, ProjectInput{
 		Name:          name,
 		RepositoryURL: SampleHelloURL,
 	})

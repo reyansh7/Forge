@@ -30,7 +30,7 @@ type enqueueJobResponse struct {
 // 202 Accepted means "queued", not "the worker finished". The handler
 // only RPUSHes; it does not wait for ExampleHandler.
 //
-// Clients cannot supply a command to execute. Type must be "example".
+// POST /jobs requires a session (Phase 3). Type must still be "example".
 // Payload is always {} so a JSON field named "command" cannot reach Redis.
 func (s *Server) enqueueJob(w http.ResponseWriter, r *http.Request) {
 	if s.Jobs == nil {

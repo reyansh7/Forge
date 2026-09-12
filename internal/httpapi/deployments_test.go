@@ -115,19 +115,19 @@ func (m *memDeployments) UpdateDeployment(_ context.Context, d store.Deployment)
 }
 
 func deployServer(projects ProjectStore, apps ApplicationStore, deps DeploymentStore, jobs JobQueue) *Server {
-	return &Server{
+	return withAuth(&Server{
 		Postgres:    stubPing{},
 		Redis:       stubPing{},
 		Projects:    projects,
 		Apps:        apps,
 		Deployments: deps,
 		Jobs:        jobs,
-	}
+	})
 }
 
 func TestCreateDeploymentAccepted(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -145,7 +145,7 @@ func TestCreateDeploymentAccepted(t *testing.T) {
 	srv := deployServer(mem, apps, newMemDeployments(), jobs)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/projects/"+p.ID+"/deployments", bytes.NewReader([]byte(`{}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -168,7 +168,7 @@ func TestCreateDeploymentUnknownProject(t *testing.T) {
 	srv := deployServer(newMemProjects(), newMemApps(), newMemDeployments(), &stubJobs{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/projects/00000000-0000-4000-8000-000000000099/deployments", bytes.NewReader([]byte(`{}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -178,7 +178,7 @@ func TestGetDeploymentNotFound(t *testing.T) {
 	srv := deployServer(newMemProjects(), newMemApps(), newMemDeployments(), &stubJobs{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/deployments/00000000-0000-4000-8000-000000000099", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -186,7 +186,7 @@ func TestGetDeploymentNotFound(t *testing.T) {
 
 func TestListDeploymentsEmpty(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -203,7 +203,7 @@ func TestListDeploymentsEmpty(t *testing.T) {
 	srv := deployServer(mem, apps, newMemDeployments(), &stubJobs{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/projects/"+p.ID+"/deployments", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -218,7 +218,7 @@ func TestListDeploymentsEmpty(t *testing.T) {
 
 func TestRollbackRequiresImage(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -241,7 +241,7 @@ func TestRollbackRequiresImage(t *testing.T) {
 	srv := deployServer(mem, apps, deps, &stubJobs{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/deployments/"+d.ID+"/rollback", bytes.NewReader([]byte(`{}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -249,7 +249,7 @@ func TestRollbackRequiresImage(t *testing.T) {
 
 func TestRollbackAccepted(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -278,7 +278,7 @@ func TestRollbackAccepted(t *testing.T) {
 	srv := deployServer(mem, apps, deps, jobs)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/deployments/"+d.ID+"/rollback", bytes.NewReader([]byte(`{}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}

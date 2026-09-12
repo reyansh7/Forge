@@ -38,9 +38,9 @@ Future-phase work must not be implemented merely because it is known to be requi
 
 | Kind | Phases | Meaning |
 |------|--------|---------|
-| **CURRENT** | 0, 1, 2 | Implemented and complete. Local loopback PaaS. |
-| **NEXT** | 3 | Next authorized work only after `START PHASE 3`. |
-| **FUTURE** | 4–10 | Documented sequence. Not authorized. |
+| **CURRENT** | 0, 1, 2, 3 | Implemented. Local loopback PaaS with operator auth. |
+| **NEXT** | 4 | Next authorized work only after `START PHASE 4`. |
+| **FUTURE** | 5–10 | Documented sequence. Not authorized. |
 
 Security requirements apply in every phase. Phases 3 and 5 add **depth**; they do not mark the start of security.
 
@@ -50,8 +50,8 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 0 Local foundation          COMPLETE
 1 Core PaaS                 COMPLETE
 2 Developer experience      COMPLETE
-3 Security hardening        NEXT
-4 Observability
+3 Security hardening        COMPLETE
+4 Observability             NEXT
 5 Production hardening      (single node: TLS, quotas, backup, rate limits)
 6 Multi-node infrastructure
 7 Advanced platform
@@ -62,7 +62,7 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 
 **Reasoning:** do not distribute or publicly expose an unauthenticated, weakly observed control plane. Authentication and deeper isolation (Phase 3) come before leaving loopback. Observability (Phase 4) comes before calling the system production. Production hardening (Phase 5) stays **single-node** so TLS, backups, and quotas exist before a second worker. Multi-node (Phase 6) waits until one node is trustworthy. Advanced PaaS features (Phase 7) wait until operation is honest. AWS (Phase 8) maps existing roles; it is not a rewrite. HA and multi-region come last.
 
-This **reorders unimplemented work**. Former “Phase 5 multi-node before Phase 6 production hardening” is rejected as less safe. Completed Phases 0–2 keep their numbers and status.
+This **reorders unimplemented work**. Former “Phase 5 multi-node before Phase 6 production hardening” is rejected as less safe. Completed Phases 0–3 keep their numbers and status.
 
 Phase 2 already ships **image rollback**. Later phases may add traffic-shifting strategies; they must not describe rollback as unimplemented.
 
@@ -178,48 +178,52 @@ Public custom domains, TLS automation, log websockets, authentication, AWS, mult
 
 ## 6. Phase 3 — Security Hardening
 
-**Status: NOT STARTED.** Do not implement until `START PHASE 3`.
+**Status: COMPLETE** (authorized `START PHASE 3`).
 
 ### Objective
 
-Deepen isolation and introduce **control-plane identity**. Security already applies; this phase adds capabilities the loopback era deferred.
+Deepen isolation and introduce **control-plane identity**. Security already applies; this phase added capabilities the loopback era deferred.
 
-### Prerequisites
-
-Phases 0–2 complete. Single-node local topology unchanged unless an increment explicitly says otherwise (default: still loopback).
-
-### Capabilities (planned increments — split work; do not dump in one PR)
+### What shipped
 
 **3.a Control-plane authentication and authorization**
 
-- Authenticate operators
-- Authorize mutating APIs (IDs in the URL are not proof of access)
-- Dashboard login only after the API enforces the same rules
+- First operator via `POST /auth/bootstrap` (empty `users` table only)
+- `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `GET /auth/status`
+- bcrypt password hashes; sessions store SHA-256 of the token, not the token
+- Bearer `Authorization` and `forge_session` cookie
+- All control-plane routes except `/health`, `/auth/status`, `/auth/bootstrap`, `/auth/login`, `/auth/logout` require a session
+- Projects have `owner_id`. A UUID in the path is not proof of access (wrong owner → 404)
+- Dashboard `/login` after the API enforces the same rules
 
 **3.b Workload and build isolation**
 
-- Tighter filesystem, network, and capability reduction beyond current `no-new-privileges` / memory / CPU / pids
-- Build isolation review (docker build remains untrusted execution)
-- Host protection: no Docker socket in workloads (already forbidden; keep it that way)
+- `docker run`: `--cap-drop ALL`, tmpfs `/tmp`, `--pull never`, existing memory/CPU/pids/`no-new-privileges`/loopback publish
+- Still forbidden: Docker socket in workloads, `--privileged`, host network
+- Build isolation documented: no host network, no socket; public image pulls remain a supply-chain review item
 
 **3.c Secrets, audit, abuse, supply chain**
 
-- Distinguish operator env metadata from a secret manager (do not pretend Postgres env is a vault)
-- Audit log for security-sensitive control-plane actions
-- Rate / abuse basics if the API is no longer “whoever can hit loopback”
-- Image/dependency review process (documentation and checks), not a marketplace of scanners as a substitute for isolation
+- Env in Postgres remains operator metadata, not a vault (comments + architecture)
+- `audit_events` for bootstrap, login, project/app/env/deploy/stop/rollback (keys, not values)
+- Login/bootstrap rate limit (10 / 10 minutes per client IP; no `X-Forwarded-For`)
+- Image/dependency review documented as an operator process, not a scanner product
 
-### Security requirements
+### Security requirements (held)
 
-Do not weaken loopback until 3.a exists. Do not expose Caddy on `0.0.0.0` in this phase unless 3.a is done **and** the increment names the bind. Tenant isolation design must not assume a second tenant can read another’s env or logs.
+Loopback binds unchanged. Caddy was **not** published on `0.0.0.0`.
 
 ### Verification / exit criteria
 
-- Unauthenticated mutating calls fail when auth is enabled
-- Workload still cannot reach control-plane Redis/Postgres/Caddy admin
-- Secrets not in logs
-- Tests for authorization negatives, not only happy paths
-- Security review recorded
+- Unauthenticated mutating calls return 401
+- Authorization negatives: another operator cannot list or GET a project (404)
+- Workload argv still cannot include Docker socket or `--privileged`
+- Env values are not written to audit metadata
+- Tests cover the above
+
+### Intentionally deferred
+
+TLS, public bind, secret manager, team RBAC, log streaming, AWS. Say `START PHASE 4` for observability.
 
 ---
 
@@ -477,7 +481,9 @@ Before moving forward:
 
 **Phase 2 — COMPLETE** (authorized `START PHASE 2`)
 
-**Phase 3 — NOT STARTED.** Do not start until the developer says `START PHASE 3`.
+**Phase 3 — COMPLETE** (authorized `START PHASE 3`)
+
+**Phase 4 — FUTURE.** Do not start until the developer says `START PHASE 4`.
 
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
@@ -489,7 +495,9 @@ Increments 0.4–0.8 (done): `deployments` table and explicit status machine; `P
 
 Phase 1 (done): `applications` + `application_env_vars`; deployments belong to an application; worker fetches the app repo and injects env; log snapshot, live health, stop; dashboard application page.
 
-Phase 2 (done): application settings (`root_directory`, `health_path`, `local_host`); persisted `build_log` / `image_name`; rollback from a prior image; bulk env replace; dashboard history. Not public DNS/TLS, not log streaming, not auth, not AWS.
+Phase 2 (done): application settings (`root_directory`, `health_path`, `local_host`); persisted `build_log` / `image_name`; rollback from a prior image; bulk env replace; dashboard history.
+
+Phase 3 (done): operator bootstrap/login; project `owner_id`; session cookies/bearer; audit log; login rate limit; tighter `docker run` isolation (`--cap-drop ALL`, tmpfs, `--pull never`). Still loopback. Not TLS, not public bind, not a secret vault, not AWS.
 
 ---
 

@@ -47,6 +47,11 @@ type Server struct {
 	// Router is unused by /health. Stop reapplies Caddy without the
 	// stopped deployment so dead ports are not routed.
 	Router RouteApplier
+	// Auth is unused by GET /health. Every other control-plane route
+	// requires a session. Tests inject memAuth; cmd/api injects Postgres.
+	Auth IdentityStore
+
+	loginGate *attemptGate
 }
 
 func (s *Server) logger() *slog.Logger {
@@ -56,16 +61,27 @@ func (s *Server) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// Handler returns the mux. Only Forge control-plane routes belong here
-// (not the HTTP servers of apps users will deploy later).
+// Handler returns the mux wrapped in withAuth.
+//
+// Only Forge control-plane routes belong here (not the HTTP servers of
+// apps users deploy — those sit behind Caddy).
 //
 // Go 1.22 method-aware patterns ("GET /health") reject POST to the same
-// path with 405 instead of treating every method as GET.
-// GET /projects and GET /projects/{id} are different patterns; the mux
-// picks the more specific one for /projects/<uuid>.
+// path with 405. GET /projects and GET /projects/{id} are different
+// patterns; the mux picks the more specific one for /projects/<uuid>.
+//
+// Public: GET /health, GET /auth/status, POST /auth/bootstrap,
+// POST /auth/login, POST /auth/logout. Everything else needs a
+// session (Bearer or forge_session cookie). Auth == nil fails closed
+// (401), so a miswired API cannot revert to Phase 0's loopback-only gate.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /auth/status", s.authStatus)
+	mux.HandleFunc("POST /auth/bootstrap", s.bootstrap)
+	mux.HandleFunc("POST /auth/login", s.login)
+	mux.HandleFunc("POST /auth/logout", s.logout)
+	mux.HandleFunc("GET /auth/me", s.me)
 	mux.HandleFunc("POST /projects", s.createProject)
 	mux.HandleFunc("GET /projects", s.listProjects)
 	mux.HandleFunc("GET /projects/{id}", s.getProject)
@@ -88,7 +104,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /deployments/{id}", s.getDeployment)
 	mux.HandleFunc("POST /deployments/{id}/rollback", s.rollbackDeployment)
 	mux.HandleFunc("POST /jobs", s.enqueueJob)
-	return mux
+	return s.withAuth(mux)
 }
 
 // healthResponse is the JSON body. Field names are the public contract

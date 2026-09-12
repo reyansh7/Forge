@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
 
@@ -19,11 +18,11 @@ import (
 // This is dependency inversion: HTTP depends on an interface, not a
 // concrete driver. That is how /health tests used stubPing in 0.1.
 //
-// Deferred: Update/Delete, authz ("does this user own this project?").
+// Deferred: Update/Delete project, team sharing (beyond owner_id).
 type ProjectStore interface {
-	CreateProject(ctx context.Context, in store.ProjectInput) (store.Project, error)
+	CreateProject(ctx context.Context, ownerID string, in store.ProjectInput) (store.Project, error)
 	GetProject(ctx context.Context, id string) (store.Project, error)
-	ListProjects(ctx context.Context) ([]store.Project, error)
+	ListProjects(ctx context.Context, ownerID string) ([]store.Project, error)
 }
 
 // createProjectRequest is the JSON the client sends. json tags are the
@@ -57,10 +56,15 @@ func projectResponseFrom(p store.Project) projectResponse {
 //
 // Flow: decode JSON → validate (400) → store insert → 201 + Location.
 // 500 bodies are generic; the real driver error goes to slog only.
-// There is no authentication in Phase 0 — loopback is the only gate.
+// There is no client-supplied owner id. The session actor is the owner.
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if s.Projects == nil {
 		writeError(w, http.StatusInternalServerError, "projects store is not configured")
+		return
+	}
+	actor, ok := ActorFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 
@@ -78,12 +82,14 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	p, err := s.Projects.CreateProject(ctx, in)
+	p, err := s.Projects.CreateProject(ctx, actor.UserID, in)
 	if err != nil {
 		s.logger().Error("create project failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to create project")
 		return
 	}
+
+	s.audit(r, actor.UserID, "project.create", "project", p.ID, map[string]string{"name": p.Name})
 
 	// Location is the HTTP convention for "here is the new resource".
 	w.Header().Set("Location", "/projects/"+p.ID)
@@ -95,11 +101,16 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "projects store is not configured")
 		return
 	}
+	actor, ok := ActorFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	list, err := s.Projects.ListProjects(ctx)
+	list, err := s.Projects.ListProjects(ctx, actor.UserID)
 	if err != nil {
 		s.logger().Error("list projects failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to list projects")
@@ -127,17 +138,8 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	defer cancel()
-
-	p, err := s.Projects.GetProject(ctx, id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "project not found")
-		return
-	}
-	if err != nil {
-		s.logger().Error("get project failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to get project")
+	p, ok := s.requireProject(w, r, id)
+	if !ok {
 		return
 	}
 

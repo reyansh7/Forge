@@ -3,6 +3,8 @@ package store
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"strings"
@@ -64,19 +66,48 @@ func databaseURLFromDotEnv(t *testing.T, path string) string {
 	return ""
 }
 
+// operatorForTest inserts a throwaway user so CreateProject can set owner_id.
+// Username is random so parallel integration tests do not collide on the
+// unique (lower(username)) index.
+func operatorForTest(t *testing.T, pg *Postgres) User {
+	t.Helper()
+	var buf [6]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := HashPassword("test-pass-ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	u, err := pg.CreateUser(ctx, "op"+hex.EncodeToString(buf[:]), hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pg.db.ExecContext(context.Background(), `DELETE FROM users WHERE id = $1::uuid`, u.ID)
+	})
+	return u
+}
+
 func TestProjectCreateGetListAgainstPostgres(t *testing.T) {
 	// End-to-end against the real table: INSERT, SELECT by id, LIST, 404.
 	pg := postgresForTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	owner := operatorForTest(t, pg)
 	name := "p02-" + time.Now().UTC().Format("20060102T150405.000000000")
-	created, err := pg.CreateProject(ctx, ProjectInput{
+	created, err := pg.CreateProject(ctx, owner.ID, ProjectInput{
 		Name:          name,
 		RepositoryURL: "https://github.com/example/forge-phase-0-2.git",
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if created.OwnerID != owner.ID {
+		t.Fatalf("OwnerID = %q, want %q", created.OwnerID, owner.ID)
 	}
 	t.Cleanup(func() {
 		_, _ = pg.db.ExecContext(context.Background(), `DELETE FROM projects WHERE id = $1::uuid`, created.ID)
@@ -90,7 +121,7 @@ func TestProjectCreateGetListAgainstPostgres(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 
-	list, err := pg.ListProjects(ctx)
+	list, err := pg.ListProjects(ctx, owner.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

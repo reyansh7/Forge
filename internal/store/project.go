@@ -73,11 +73,12 @@ func UsesBundledHello(raw string) bool {
 //
 // Security: RepositoryURL is a string we persist. Storing it does not
 // clone, HTTP-GET, or exec the remote. That would be SSRF / untrusted code.
-// No auth in Phase 0 — any client on loopback can insert rows.
-//
-// Deferred: owner user_id. Applications and deployments are Phase 1.
+// OwnerID is the operator who may see and mutate this project. A project
+// UUID in a URL is not authorization — HTTP must compare OwnerID to the
+// authenticated actor.
 type Project struct {
 	ID            string
+	OwnerID       string
 	Name          string
 	RepositoryURL string
 	CreatedAt     time.Time
@@ -191,10 +192,14 @@ func ParseUUID(id string) (string, error) {
 //
 // $1 / $2 are bound parameters — the name never becomes SQL text
 // (SQL injection). %w wraps the driver error for logs, not for the client.
-func (p *Postgres) CreateProject(ctx context.Context, in ProjectInput) (Project, error) {
+func (p *Postgres) CreateProject(ctx context.Context, ownerID string, in ProjectInput) (Project, error) {
 	in, err := ValidateProjectInput(in.Name, in.RepositoryURL)
 	if err != nil {
 		return Project{}, err
+	}
+	ownerID, err = ParseUUID(ownerID)
+	if err != nil {
+		return Project{}, fmt.Errorf("owner id: %w", err)
 	}
 
 	tx, err := p.db.BeginTx(ctx, nil)
@@ -204,12 +209,14 @@ func (p *Postgres) CreateProject(ctx context.Context, in ProjectInput) (Project,
 	defer func() { _ = tx.Rollback() }()
 
 	var out Project
+	var owner sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO projects (name, repository_url)
-		VALUES ($1, $2)
-		RETURNING id::text, name, repository_url, created_at, updated_at
-	`, in.Name, in.RepositoryURL).Scan(
+		INSERT INTO projects (name, repository_url, owner_id)
+		VALUES ($1, $2, $3::uuid)
+		RETURNING id::text, owner_id::text, name, repository_url, created_at, updated_at
+	`, in.Name, in.RepositoryURL, ownerID).Scan(
 		&out.ID,
+		&owner,
 		&out.Name,
 		&out.RepositoryURL,
 		&out.CreatedAt,
@@ -218,6 +225,7 @@ func (p *Postgres) CreateProject(ctx context.Context, in ProjectInput) (Project,
 	if err != nil {
 		return Project{}, fmt.Errorf("insert project: %w", err)
 	}
+	out.OwnerID = owner.String
 
 	// Phase 1: every project has at least one application. The repo URL
 	// lives on the application; the project copy is the original default.
@@ -242,12 +250,14 @@ func (p *Postgres) GetProject(ctx context.Context, id string) (Project, error) {
 	}
 
 	var out Project
+	var owner sql.NullString
 	err = p.db.QueryRowContext(ctx, `
-		SELECT id::text, name, repository_url, created_at, updated_at
+		SELECT id::text, owner_id::text, name, repository_url, created_at, updated_at
 		FROM projects
 		WHERE id = $1::uuid
 	`, id).Scan(
 		&out.ID,
+		&owner,
 		&out.Name,
 		&out.RepositoryURL,
 		&out.CreatedAt,
@@ -259,23 +269,29 @@ func (p *Postgres) GetProject(ctx context.Context, id string) (Project, error) {
 	if err != nil {
 		return Project{}, fmt.Errorf("get project: %w", err)
 	}
+	out.OwnerID = owner.String
 	return out, nil
 }
 
-// ListProjects returns every project, newest first.
+// ListProjects returns projects owned by ownerID, newest first.
+//
+// Other operators' rows are not in this result. HTTP still re-checks
+// OwnerID on Get so a guessed UUID cannot skip this filter.
 //
 // make([]Project, 0) is a non-nil empty slice. JSON encodes that as []
 // rather than null — nicer for clients. defer rows.Close() returns the
 // connection to the pool; skipping Close leaks pool slots under load.
-// rows.Err() catches iteration errors that Next() swallowed.
-//
-// Deferred: pagination. An unbounded list is acceptable for local Phase 0.
-func (p *Postgres) ListProjects(ctx context.Context) ([]Project, error) {
+func (p *Postgres) ListProjects(ctx context.Context, ownerID string) ([]Project, error) {
+	ownerID, err := ParseUUID(ownerID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := p.db.QueryContext(ctx, `
-		SELECT id::text, name, repository_url, created_at, updated_at
+		SELECT id::text, owner_id::text, name, repository_url, created_at, updated_at
 		FROM projects
+		WHERE owner_id = $1::uuid
 		ORDER BY created_at DESC
-	`)
+	`, ownerID)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
@@ -284,8 +300,10 @@ func (p *Postgres) ListProjects(ctx context.Context) ([]Project, error) {
 	out := make([]Project, 0)
 	for rows.Next() {
 		var item Project
+		var owner sql.NullString
 		if err := rows.Scan(
 			&item.ID,
+			&owner,
 			&item.Name,
 			&item.RepositoryURL,
 			&item.CreatedAt,
@@ -293,6 +311,7 @@ func (p *Postgres) ListProjects(ctx context.Context) ([]Project, error) {
 		); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
+		item.OwnerID = owner.String
 		out = append(out, item)
 	}
 	if err := rows.Err(); err != nil {

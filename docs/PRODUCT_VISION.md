@@ -36,7 +36,7 @@ It does **not** mean copying Vercel, Railway, Render, Fly.io, Coolify, or Netlif
 
 ## 2. Current vs direction
 
-**Current (Phase 2, local):** one machine, loopback binds, Docker workloads, Caddy on `127.0.0.1:9080`, optional `{slug}.localhost` (not public DNS), explicit deployment state machine, HTTP health at go-live, log snapshots, env vars in Postgres, image-based rollback. No authentication UI. No TLS. No multi-tenant internet exposure.
+**Current (Phase 3, local):** one machine, loopback binds, operator sessions, Docker workloads with cap-drop, Caddy on `127.0.0.1:9080`, optional `{slug}.localhost` (not public DNS), explicit deployment state machine, HTTP health at go-live, log snapshots, env vars in Postgres, image-based rollback, audit events. No TLS. No public bind. No multi-tenant internet exposure.
 
 **Direction:** the same control-plane / workload-plane split, evolved through roadmap phases into a system an operator can expose, observe, and operate with confidence.
 

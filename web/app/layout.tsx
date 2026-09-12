@@ -3,6 +3,7 @@ import { Fraunces, Outfit, IBM_Plex_Mono } from "next/font/google";
 import Link from "next/link";
 import "./globals.css";
 import { HealthDot } from "./health";
+import { SessionBar } from "./session";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -38,7 +39,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <span className="brand-sub">Local platform</span>
               </span>
             </Link>
-            <HealthDot />
+            <div className="top-meta">
+              <SessionBar />
+              <HealthDot />
+            </div>
           </header>
           {children}
         </div>

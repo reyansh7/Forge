@@ -89,6 +89,7 @@ func run(log *slog.Logger) error {
 		Jobs:        jobs,
 		Runtime:     runtime.HostDocker{},
 		Router:      proxy.Caddy{AdminURL: cfg.CaddyAdminURL, UpstreamHost: cfg.CaddyUpstreamHost},
+		Auth:        pg,
 	}
 
 	srv := &http.Server{

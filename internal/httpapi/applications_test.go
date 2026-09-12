@@ -173,7 +173,7 @@ func (s *stubRuntime) Stop(_ context.Context, name string) error {
 func (s *stubRuntime) Running(context.Context, string) (bool, error) { return s.running, nil }
 
 func appServer(projects ProjectStore, apps ApplicationStore, deps DeploymentStore) *Server {
-	return &Server{
+	return withAuth(&Server{
 		Postgres:    stubPing{},
 		Redis:       stubPing{},
 		Projects:    projects,
@@ -181,12 +181,12 @@ func appServer(projects ProjectStore, apps ApplicationStore, deps DeploymentStor
 		Deployments: deps,
 		Jobs:        &stubJobs{},
 		Runtime:     &stubRuntime{logs: "hello from container\n"},
-	}
+	})
 }
 
 func TestCreateApplicationCreated(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -197,7 +197,7 @@ func TestCreateApplicationCreated(t *testing.T) {
 	body := []byte(`{"name":"api","repository_url":"forge://hello"}`)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/projects/"+p.ID+"/applications", bytes.NewReader(body))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -205,7 +205,7 @@ func TestCreateApplicationCreated(t *testing.T) {
 
 func TestPutEnvRejectsPORT(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -223,7 +223,7 @@ func TestPutEnvRejectsPORT(t *testing.T) {
 	srv := appServer(mem, apps, newMemDeployments())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/applications/"+app.ID+"/env", bytes.NewReader([]byte(`{"key":"PORT","value":"9"}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -231,7 +231,7 @@ func TestPutEnvRejectsPORT(t *testing.T) {
 
 func TestPutEnvAccepted(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -249,7 +249,7 @@ func TestPutEnvAccepted(t *testing.T) {
 	srv := appServer(mem, apps, newMemDeployments())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/applications/"+app.ID+"/env", bytes.NewReader([]byte(`{"key":"GREETING","value":"hi"}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -257,7 +257,7 @@ func TestPutEnvAccepted(t *testing.T) {
 
 func TestReplaceEnvBulk(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -275,7 +275,7 @@ func TestReplaceEnvBulk(t *testing.T) {
 	srv := appServer(mem, apps, newMemDeployments())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/applications/"+app.ID+"/env/bulk", bytes.NewReader([]byte(`{"vars":[{"key":"GREETING","value":"hi"}]}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -283,7 +283,7 @@ func TestReplaceEnvBulk(t *testing.T) {
 
 func TestApplicationLogsNeedLive(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -301,7 +301,7 @@ func TestApplicationLogsNeedLive(t *testing.T) {
 	srv := appServer(mem, apps, newMemDeployments())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/applications/"+app.ID+"/logs", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -309,7 +309,7 @@ func TestApplicationLogsNeedLive(t *testing.T) {
 
 func TestStopApplication(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -338,7 +338,7 @@ func TestStopApplication(t *testing.T) {
 	srv.Runtime = rt
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/stop", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -349,7 +349,7 @@ func TestStopApplication(t *testing.T) {
 
 func TestCreateDeploymentConflictWhenMultipleApps(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -362,7 +362,7 @@ func TestCreateDeploymentConflictWhenMultipleApps(t *testing.T) {
 	srv := deployServer(mem, apps, newMemDeployments(), &stubJobs{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/projects/"+p.ID+"/deployments", bytes.NewReader([]byte(`{}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -370,7 +370,7 @@ func TestCreateDeploymentConflictWhenMultipleApps(t *testing.T) {
 
 func TestCreateDeploymentRejectedWhenLive(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -399,7 +399,7 @@ func TestCreateDeploymentRejectedWhenLive(t *testing.T) {
 	srv.Runtime = rt
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/deployments", bytes.NewReader([]byte(`{}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -407,7 +407,7 @@ func TestCreateDeploymentRejectedWhenLive(t *testing.T) {
 
 func TestCreateDeploymentRecoversStaleLive(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -437,7 +437,7 @@ func TestCreateDeploymentRecoversStaleLive(t *testing.T) {
 	srv.Runtime = rt
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/deployments", bytes.NewReader([]byte(`{}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -445,7 +445,7 @@ func TestCreateDeploymentRecoversStaleLive(t *testing.T) {
 
 func TestApplicationHealthStoppedWithoutLive(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -463,7 +463,7 @@ func TestApplicationHealthStoppedWithoutLive(t *testing.T) {
 	srv := appServer(mem, apps, newMemDeployments())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/applications/"+app.ID+"/health", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -478,7 +478,7 @@ func TestApplicationHealthStoppedWithoutLive(t *testing.T) {
 
 func TestApplicationHealthUsesContainerStateNotHTTP(t *testing.T) {
 	mem := newMemProjects()
-	p, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: store.SampleHelloURL,
 	})
@@ -509,7 +509,7 @@ func TestApplicationHealthUsesContainerStateNotHTTP(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/applications/"+app.ID+"/health", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -527,7 +527,7 @@ func TestApplicationHealthUsesContainerStateNotHTTP(t *testing.T) {
 	rt.running = false
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/applications/"+app.ID+"/health", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}

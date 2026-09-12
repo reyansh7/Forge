@@ -113,12 +113,7 @@ func (s *Server) createApplication(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	if _, err := s.Projects.GetProject(ctx, projectID); errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "project not found")
-		return
-	} else if err != nil {
-		s.logger().Error("get project for application failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to create application")
+	if _, ok := s.requireProject(w, r, projectID); !ok {
 		return
 	}
 
@@ -134,6 +129,7 @@ func (s *Server) createApplication(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Location", "/applications/"+app.ID)
 	writeJSON(w, http.StatusCreated, applicationResponseFrom(app))
+	s.audit(r, "", "application.create", "application", app.ID, map[string]string{"name": app.Name, "project_id": projectID})
 }
 
 func (s *Server) listApplications(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +144,9 @@ func (s *Server) listApplications(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
+	if _, ok := s.requireProject(w, r, projectID); !ok {
+		return
+	}
 	list, err := s.Apps.ListApplicationsByProject(ctx, projectID)
 	if err != nil {
 		s.logger().Error("list applications failed", "err", err)
@@ -174,11 +173,11 @@ func (s *Server) updateApplication(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "applications are not configured")
 		return
 	}
-	id, err := store.ParseUUID(r.PathValue("id"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid application id")
+	app, ok := s.loadApplication(w, r)
+	if !ok {
 		return
 	}
+	id := app.ID
 	var req applicationBody
 	if !decodeJSON(r, w, &req) {
 		return
@@ -190,7 +189,7 @@ func (s *Server) updateApplication(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	app, err := s.Apps.UpdateApplication(ctx, id, in)
+	app, err = s.Apps.UpdateApplication(ctx, id, in)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "application not found")
 		return
@@ -204,6 +203,7 @@ func (s *Server) updateApplication(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update application")
 		return
 	}
+	s.audit(r, "", "application.update", "application", app.ID, map[string]string{"name": app.Name})
 	writeJSON(w, http.StatusOK, applicationResponseFrom(app))
 }
 
@@ -230,6 +230,7 @@ func (s *Server) deleteApplication(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to delete application")
 		return
 	}
+	s.audit(r, "", "application.delete", "application", app.ID, map[string]string{"project_id": app.ProjectID})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -238,9 +239,8 @@ func (s *Server) createApplicationDeployment(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "deployments are not configured")
 		return
 	}
-	id, err := store.ParseUUID(r.PathValue("id"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid application id")
+	app, ok := s.loadApplication(w, r)
+	if !ok {
 		return
 	}
 	var ignore struct{}
@@ -249,15 +249,7 @@ func (s *Server) createApplicationDeployment(w http.ResponseWriter, r *http.Requ
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
-	if _, err := s.Apps.GetApplication(ctx, id); errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "application not found")
-		return
-	} else if err != nil {
-		s.logger().Error("get application for deploy failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to create deployment")
-		return
-	}
-	s.enqueueDeployment(w, r, ctx, id)
+	s.enqueueDeployment(w, r, ctx, app.ID)
 }
 
 func (s *Server) listApplicationDeployments(w http.ResponseWriter, r *http.Request) {
@@ -265,14 +257,13 @@ func (s *Server) listApplicationDeployments(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "deployments are not configured")
 		return
 	}
-	id, err := store.ParseUUID(r.PathValue("id"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid application id")
+	app, ok := s.loadApplication(w, r)
+	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	list, err := s.Deployments.ListDeploymentsByApplication(ctx, id)
+	list, err := s.Deployments.ListDeploymentsByApplication(ctx, app.ID)
 	if err != nil {
 		s.logger().Error("list application deployments failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to list deployments")
@@ -398,6 +389,7 @@ func (s *Server) stopApplication(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.haltLive(ctx, live, "stopped by operator")
+	s.audit(r, "", "application.stop", "application", app.ID, map[string]string{"deployment_id": live.ID})
 	live.Status = store.StatusStopped
 	live.ErrorMessage = store.SanitizeErrorMessage("stopped by operator")
 	writeJSON(w, http.StatusOK, deploymentResponseFrom(live))
@@ -454,6 +446,7 @@ func (s *Server) putEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, envVarResponse{Key: req.Key, Value: req.Value})
+	s.audit(r, "", "env.put", "application", app.ID, map[string]string{"key": req.Key})
 }
 
 func (s *Server) replaceEnv(w http.ResponseWriter, r *http.Request) {
@@ -492,6 +485,7 @@ func (s *Server) replaceEnv(w http.ResponseWriter, r *http.Request) {
 	for _, ev := range vars {
 		out = append(out, envVarResponse{Key: ev.Key, Value: ev.Value})
 	}
+	s.audit(r, "", "env.replace", "application", app.ID, map[string]string{"count": strconv.Itoa(len(vars))})
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -511,6 +505,7 @@ func (s *Server) deleteEnv(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to delete env")
 		return
 	}
+	s.audit(r, "", "env.delete", "application", app.ID, map[string]string{"key": key})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -534,6 +529,22 @@ func (s *Server) loadApplication(w http.ResponseWriter, r *http.Request) (store.
 	if err != nil {
 		s.logger().Error("get application failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to get application")
+		return store.Application{}, false
+	}
+	// Same 404 as a missing app so a guessed application UUID does not
+	// reveal "this id exists but you do not own the project".
+	actor, ok := ActorFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return store.Application{}, false
+	}
+	if s.Projects == nil {
+		writeError(w, http.StatusInternalServerError, "projects store is not configured")
+		return store.Application{}, false
+	}
+	proj, err := s.Projects.GetProject(ctx, app.ProjectID)
+	if err != nil || proj.OwnerID == "" || proj.OwnerID != actor.UserID {
+		writeError(w, http.StatusNotFound, "application not found")
 		return store.Application{}, false
 	}
 	return app, true

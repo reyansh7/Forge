@@ -10,8 +10,12 @@ import (
 
 // EnvVar is one operator-supplied environment binding for an application.
 //
-// Values are persisted in PostgreSQL (local Phase 1). This is not a
-// secret manager. Never log Value. The worker injects pairs as docker -e.
+// Values are persisted in PostgreSQL. This is operator metadata, not a
+// vault: the table is readable to anyone with the database URL, values
+// are not encrypted at rest by Forge, and a SELECT dumps every secret.
+// Dedicated secret management (encryption, rotation, lease) is a later
+// phase. Never log Value. Audit events may record the key name only.
+// The worker injects pairs as docker -e.
 type EnvVar struct {
 	Key   string
 	Value string

@@ -26,7 +26,7 @@ func newMemProjects() *memProjects {
 	return &memProjects{byID: map[string]store.Project{}}
 }
 
-func (m *memProjects) CreateProject(_ context.Context, in store.ProjectInput) (store.Project, error) {
+func (m *memProjects) CreateProject(_ context.Context, ownerID string, in store.ProjectInput) (store.Project, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seq++
@@ -34,6 +34,7 @@ func (m *memProjects) CreateProject(_ context.Context, in store.ProjectInput) (s
 	// IDs look like real UUIDs so ParseProjectID on GET /projects/{id} succeeds.
 	p := store.Project{
 		ID:            "00000000-0000-4000-8000-00000000000" + itoaDigit(m.seq),
+		OwnerID:       ownerID,
 		Name:          in.Name,
 		RepositoryURL: in.RepositoryURL,
 		CreatedAt:     now,
@@ -53,12 +54,14 @@ func (m *memProjects) GetProject(_ context.Context, id string) (store.Project, e
 	return p, nil
 }
 
-func (m *memProjects) ListProjects(context.Context) ([]store.Project, error) {
+func (m *memProjects) ListProjects(_ context.Context, ownerID string) ([]store.Project, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]store.Project, 0, len(m.byID))
 	for _, p := range m.byID {
-		out = append(out, p)
+		if p.OwnerID == ownerID {
+			out = append(out, p)
+		}
 	}
 	return out, nil
 }
@@ -72,11 +75,11 @@ func itoaDigit(n int) string {
 
 func projectServer(store ProjectStore) *Server {
 	// httptest drives Handler() without opening :8080.
-	return &Server{
+	return withAuth(&Server{
 		Postgres: stubPing{},
 		Redis:    stubPing{},
 		Projects: store,
-	}
+	})
 }
 
 func TestCreateProjectCreated(t *testing.T) {
@@ -85,7 +88,7 @@ func TestCreateProjectCreated(t *testing.T) {
 	body := []byte(`{"name":"demo","repository_url":"https://github.com/example/app.git"}`)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/projects", bytes.NewReader(body))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
@@ -107,7 +110,7 @@ func TestCreateProjectRejectsInvalidBody(t *testing.T) {
 	srv := projectServer(newMemProjects())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/projects", bytes.NewReader([]byte(`{"name":"","repository_url":"https://example.com/r.git"}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -118,7 +121,7 @@ func TestCreateProjectRejectsFileURL(t *testing.T) {
 	srv := projectServer(newMemProjects())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/projects", bytes.NewReader([]byte(`{"name":"x","repository_url":"file:///etc/passwd"}`)))
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -129,7 +132,7 @@ func TestListProjectsEmpty(t *testing.T) {
 	srv := projectServer(newMemProjects())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/projects", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -147,7 +150,7 @@ func TestGetProjectNotFound(t *testing.T) {
 	srv := projectServer(newMemProjects())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/projects/00000000-0000-4000-8000-000000000099", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -158,7 +161,7 @@ func TestGetProjectInvalidID(t *testing.T) {
 	srv := projectServer(newMemProjects())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/projects/not-a-uuid", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -168,7 +171,7 @@ func TestGetProjectOK(t *testing.T) {
 	// GET after a create through the same fake store.
 	mem := newMemProjects()
 	srv := projectServer(mem)
-	created, err := mem.CreateProject(context.Background(), store.ProjectInput{
+	created, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
 		RepositoryURL: "https://github.com/example/app.git",
 	})
@@ -178,7 +181,7 @@ func TestGetProjectOK(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/projects/"+created.ID, nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -189,7 +192,7 @@ func TestHealthStillOKWithProjectsWired(t *testing.T) {
 	srv := projectServer(newMemProjects())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	srv.Handler().ServeHTTP(rec, req)
+	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}

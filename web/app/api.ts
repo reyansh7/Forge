@@ -54,7 +54,37 @@ export type AppHealth = {
   public_url?: string;
 };
 
+const TOKEN_KEY = "forge_session_token";
+
+export function setSessionToken(token: string) {
+  sessionStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearSession() {
+  sessionStorage.removeItem(TOKEN_KEY);
+}
+
+function sessionToken(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return sessionStorage.getItem(TOKEN_KEY) || "";
+}
+
+function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const token = sessionToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  return fetch(path, { ...init, headers, credentials: "include" });
+}
+
 async function parse<T>(res: Response): Promise<T> {
+  if (res.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+    clearSession();
+    window.location.href = "/login";
+  }
   const text = await res.text();
   let body: unknown = null;
   if (text) {
@@ -71,12 +101,54 @@ async function parse<T>(res: Response): Promise<T> {
   return body as T;
 }
 
+export type AuthUser = {
+  id: string;
+  username: string;
+};
+
+export type AuthSession = {
+  token: string;
+  user: AuthUser;
+};
+
+export function authStatus(): Promise<{ bootstrap_required: boolean }> {
+  return apiFetch("/forge-api/auth/status").then((r) => parse<{ bootstrap_required: boolean }>(r));
+}
+
+export function bootstrap(username: string, password: string): Promise<AuthSession> {
+  return apiFetch("/forge-api/auth/bootstrap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  }).then((r) => parse<AuthSession>(r));
+}
+
+export function login(username: string, password: string): Promise<AuthSession> {
+  return apiFetch("/forge-api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  }).then((r) => parse<AuthSession>(r));
+}
+
+export function logout(): Promise<void> {
+  return apiFetch("/forge-api/auth/logout", { method: "POST" }).then(async (r) => {
+    if (!r.ok && r.status !== 204) {
+      return parse<void>(r);
+    }
+  });
+}
+
+export function me(): Promise<AuthUser> {
+  return apiFetch("/forge-api/auth/me").then((r) => parse<AuthUser>(r));
+}
+
 export function listProjects(): Promise<Project[]> {
-  return fetch("/forge-api/projects").then((r) => parse<Project[]>(r));
+  return apiFetch("/forge-api/projects").then((r) => parse<Project[]>(r));
 }
 
 export function createProject(name: string, repository_url: string): Promise<Project> {
-  return fetch("/forge-api/projects", {
+  return apiFetch("/forge-api/projects", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, repository_url }),
@@ -84,11 +156,11 @@ export function createProject(name: string, repository_url: string): Promise<Pro
 }
 
 export function getProject(id: string): Promise<Project> {
-  return fetch(`/forge-api/projects/${id}`).then((r) => parse<Project>(r));
+  return apiFetch(`/forge-api/projects/${id}`).then((r) => parse<Project>(r));
 }
 
 export function listApplications(projectId: string): Promise<Application[]> {
-  return fetch(`/forge-api/projects/${projectId}/applications`).then((r) => parse<Application[]>(r));
+  return apiFetch(`/forge-api/projects/${projectId}/applications`).then((r) => parse<Application[]>(r));
 }
 
 export function createApplication(
@@ -96,7 +168,7 @@ export function createApplication(
   name: string,
   repository_url: string,
 ): Promise<Application> {
-  return fetch(`/forge-api/projects/${projectId}/applications`, {
+  return apiFetch(`/forge-api/projects/${projectId}/applications`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, repository_url }),
@@ -104,7 +176,7 @@ export function createApplication(
 }
 
 export function getApplication(id: string): Promise<Application> {
-  return fetch(`/forge-api/applications/${id}`).then((r) => parse<Application>(r));
+  return apiFetch(`/forge-api/applications/${id}`).then((r) => parse<Application>(r));
 }
 
 export function updateApplication(
@@ -117,7 +189,7 @@ export function updateApplication(
     local_host: string;
   },
 ): Promise<Application> {
-  return fetch(`/forge-api/applications/${id}`, {
+  return apiFetch(`/forge-api/applications/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -125,7 +197,7 @@ export function updateApplication(
 }
 
 export function deleteApplication(id: string): Promise<void> {
-  return fetch(`/forge-api/applications/${id}`, { method: "DELETE" }).then((r) => {
+  return apiFetch(`/forge-api/applications/${id}`, { method: "DELETE" }).then((r) => {
     if (!r.ok && r.status !== 204) {
       return parse<void>(r);
     }
@@ -133,17 +205,17 @@ export function deleteApplication(id: string): Promise<void> {
 }
 
 export function listDeployments(projectId: string): Promise<Deployment[]> {
-  return fetch(`/forge-api/projects/${projectId}/deployments`).then((r) => parse<Deployment[]>(r));
+  return apiFetch(`/forge-api/projects/${projectId}/deployments`).then((r) => parse<Deployment[]>(r));
 }
 
 export function listApplicationDeployments(applicationId: string): Promise<Deployment[]> {
-  return fetch(`/forge-api/applications/${applicationId}/deployments`).then((r) =>
+  return apiFetch(`/forge-api/applications/${applicationId}/deployments`).then((r) =>
     parse<Deployment[]>(r),
   );
 }
 
 export function createDeployment(projectId: string): Promise<Deployment> {
-  return fetch(`/forge-api/projects/${projectId}/deployments`, {
+  return apiFetch(`/forge-api/projects/${projectId}/deployments`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
@@ -151,7 +223,7 @@ export function createDeployment(projectId: string): Promise<Deployment> {
 }
 
 export function createApplicationDeployment(applicationId: string): Promise<Deployment> {
-  return fetch(`/forge-api/applications/${applicationId}/deployments`, {
+  return apiFetch(`/forge-api/applications/${applicationId}/deployments`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
@@ -159,15 +231,15 @@ export function createApplicationDeployment(applicationId: string): Promise<Depl
 }
 
 export function getDeployment(id: string): Promise<Deployment> {
-  return fetch(`/forge-api/deployments/${id}`).then((r) => parse<Deployment>(r));
+  return apiFetch(`/forge-api/deployments/${id}`).then((r) => parse<Deployment>(r));
 }
 
 export function listEnv(applicationId: string): Promise<EnvVar[]> {
-  return fetch(`/forge-api/applications/${applicationId}/env`).then((r) => parse<EnvVar[]>(r));
+  return apiFetch(`/forge-api/applications/${applicationId}/env`).then((r) => parse<EnvVar[]>(r));
 }
 
 export function putEnv(applicationId: string, key: string, value: string): Promise<EnvVar> {
-  return fetch(`/forge-api/applications/${applicationId}/env`, {
+  return apiFetch(`/forge-api/applications/${applicationId}/env`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ key, value }),
@@ -175,7 +247,7 @@ export function putEnv(applicationId: string, key: string, value: string): Promi
 }
 
 export function deleteEnv(applicationId: string, key: string): Promise<void> {
-  return fetch(`/forge-api/applications/${applicationId}/env/${encodeURIComponent(key)}`, {
+  return apiFetch(`/forge-api/applications/${applicationId}/env/${encodeURIComponent(key)}`, {
     method: "DELETE",
   }).then((r) => {
     if (!r.ok && r.status !== 204) {
@@ -185,7 +257,7 @@ export function deleteEnv(applicationId: string, key: string): Promise<void> {
 }
 
 export function replaceEnv(applicationId: string, vars: EnvVar[]): Promise<EnvVar[]> {
-  return fetch(`/forge-api/applications/${applicationId}/env/bulk`, {
+  return apiFetch(`/forge-api/applications/${applicationId}/env/bulk`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ vars }),
@@ -193,7 +265,7 @@ export function replaceEnv(applicationId: string, vars: EnvVar[]): Promise<EnvVa
 }
 
 export function rollbackDeployment(sourceId: string): Promise<Deployment> {
-  return fetch(`/forge-api/deployments/${sourceId}/rollback`, {
+  return apiFetch(`/forge-api/deployments/${sourceId}/rollback`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
@@ -218,17 +290,17 @@ export function parseDotEnv(text: string): EnvVar[] {
 }
 
 export function getApplicationLogs(applicationId: string, tail = 100): Promise<AppLogs> {
-  return fetch(`/forge-api/applications/${applicationId}/logs?tail=${tail}`).then((r) =>
+  return apiFetch(`/forge-api/applications/${applicationId}/logs?tail=${tail}`).then((r) =>
     parse<AppLogs>(r),
   );
 }
 
 export function getApplicationHealth(applicationId: string): Promise<AppHealth> {
-  return fetch(`/forge-api/applications/${applicationId}/health`).then((r) => parse<AppHealth>(r));
+  return apiFetch(`/forge-api/applications/${applicationId}/health`).then((r) => parse<AppHealth>(r));
 }
 
 export function stopApplication(applicationId: string): Promise<Deployment> {
-  return fetch(`/forge-api/applications/${applicationId}/stop`, { method: "POST" }).then((r) =>
+  return apiFetch(`/forge-api/applications/${applicationId}/stop`, { method: "POST" }).then((r) =>
     parse<Deployment>(r),
   );
 }
@@ -240,7 +312,7 @@ export type Health = {
 };
 
 export function getHealth(): Promise<Health> {
-  return fetch("/forge-api/health").then((r) => parse<Health>(r));
+  return apiFetch("/forge-api/health").then((r) => parse<Health>(r));
 }
 
 export function isBundledSample(url: string): boolean {

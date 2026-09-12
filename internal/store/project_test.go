@@ -26,6 +26,12 @@ func TestMigrationFileNamesAreVersioned(t *testing.T) {
 	if len(names) < 4 || names[3] != "0004_one_live_per_application.sql" {
 		t.Fatalf("fourth migration = %v, want 0004_one_live_per_application.sql", names)
 	}
+	if len(names) < 5 || names[4] != "0005_application_settings.sql" {
+		t.Fatalf("fifth migration = %v, want 0005_application_settings.sql", names)
+	}
+	if len(names) < 6 || names[5] != "0006_identity.sql" {
+		t.Fatalf("sixth migration = %v, want 0006_identity.sql", names)
+	}
 }
 
 func TestUsesBundledHello(t *testing.T) {

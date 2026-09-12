@@ -87,6 +87,13 @@ func (HostDocker) Build(ctx context.Context, dir, image, kind string) (string, e
 		return "", err
 	}
 	cmd := exec.CommandContext(ctx, "docker", "build", "-t", image, "--", dir)
+	// docker build runs the Dockerfile as untrusted execution inside
+	// the build container. We do not pass --network=host, --privileged,
+	// or -v /var/run/docker.sock. The build can still reach the public
+	// internet to pull base images (needed for FROM). That is a supply-
+	// chain risk the operator accepts by deploying the repo; it is not
+	// a path onto the control-plane Postgres/Redis sockets, which stay
+	// published on loopback only.
 	out, err := cmd.CombinedOutput()
 	log := string(out)
 	if err != nil {
@@ -108,27 +115,17 @@ func (HostDocker) Run(ctx context.Context, image, containerName string, env []En
 		return Instance{}, err
 	}
 
-	// Isolation for Phase 0/1 (not Phase 3 hardening):
+	// Isolation (Phase 0 limits + Phase 3 hardening):
 	// - publish on 127.0.0.1 only (not 0.0.0.0)
 	// - memory / cpu / pids caps
+	// - cap-drop ALL, tmpfs /tmp, pull=never
 	// - no --privileged, no volume mounts, no Docker socket
 	// - user env first, then PORT=8080 so Forge wins if a key collides
 	publish := "127.0.0.1:" + strconv.Itoa(port) + ":8080"
-	args := []string{
-		"run", "-d",
-		"--name", containerName,
-		"--memory", "256m",
-		"--cpus", "0.5",
-		"--pids-limit", "256",
-		"--security-opt", "no-new-privileges",
+	args, err := dockerRunArgs(image, containerName, publish, env)
+	if err != nil {
+		return Instance{}, err
 	}
-	for _, ev := range env {
-		if err := validateEnvPair(ev); err != nil {
-			return Instance{}, err
-		}
-		args = append(args, "-e", ev.Key+"="+ev.Value)
-	}
-	args = append(args, "-e", "PORT=8080", "-p", publish, "--", image)
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -139,6 +136,40 @@ func (HostDocker) Run(ctx context.Context, image, containerName string, env []En
 		id = id[:64]
 	}
 	return Instance{ContainerID: id, HostPort: port}, nil
+}
+
+// dockerRunArgs is the argv after "docker" for a workload container.
+//
+// Phase 3 isolation on top of Phase 0 limits:
+//   - --cap-drop ALL: the process cannot use Linux capabilities
+//     (NET_ADMIN, SYS_ADMIN, …) even if the image's user is root.
+//   - tmpfs /tmp: writable scratch that is not a host bind mount.
+//   - --pull never: the tag must already exist locally (we just built
+//     it, or rollback reused it). A typo must not pull from a registry.
+//
+// Still forbidden: --privileged, Docker socket mounts, host network,
+// publishing on 0.0.0.0. Read-only rootfs is not set — many images
+// write under /app (pyc, npm) and would fail closed incorrectly.
+func dockerRunArgs(image, containerName, publish string, env []EnvPair) ([]string, error) {
+	args := []string{
+		"run", "-d",
+		"--name", containerName,
+		"--memory", "256m",
+		"--cpus", "0.5",
+		"--pids-limit", "256",
+		"--security-opt", "no-new-privileges",
+		"--cap-drop", "ALL",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+		"--pull", "never",
+	}
+	for _, ev := range env {
+		if err := validateEnvPair(ev); err != nil {
+			return nil, err
+		}
+		args = append(args, "-e", ev.Key+"="+ev.Value)
+	}
+	args = append(args, "-e", "PORT=8080", "-p", publish, "--", image)
+	return args, nil
 }
 
 func (HostDocker) Stop(ctx context.Context, containerName string) error {

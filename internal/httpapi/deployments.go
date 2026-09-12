@@ -95,12 +95,7 @@ func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 
-	if _, err := s.Projects.GetProject(ctx, projectID); errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "project not found")
-		return
-	} else if err != nil {
-		s.logger().Error("get project for deploy failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to create deployment")
+	if _, ok := s.requireProject(w, r, projectID); !ok {
 		return
 	}
 
@@ -125,7 +120,7 @@ func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
 	s.enqueueDeployment(w, r, ctx, apps[0].ID)
 }
 
-func (s *Server) enqueueDeployment(w http.ResponseWriter, _ *http.Request, ctx context.Context, applicationID string) {
+func (s *Server) enqueueDeployment(w http.ResponseWriter, r *http.Request, ctx context.Context, applicationID string) {
 	list, err := s.Deployments.ListDeploymentsByApplication(ctx, applicationID)
 	if err != nil {
 		s.logger().Error("list deployments before enqueue failed", "err", err)
@@ -173,10 +168,10 @@ func (s *Server) enqueueDeployment(w http.ResponseWriter, _ *http.Request, ctx c
 		return
 	}
 
-	s.enqueueQueued(w, ctx, d)
+	s.enqueueQueued(w, r, ctx, d)
 }
 
-func (s *Server) enqueueQueued(w http.ResponseWriter, ctx context.Context, d store.Deployment) {
+func (s *Server) enqueueQueued(w http.ResponseWriter, r *http.Request, ctx context.Context, d store.Deployment) {
 	jobID, err := queue.NewID()
 	if err != nil {
 		s.logger().Error("job id failed", "err", err)
@@ -205,6 +200,11 @@ func (s *Server) enqueueQueued(w http.ResponseWriter, ctx context.Context, d sto
 	}
 
 	w.Header().Set("Location", "/deployments/"+d.ID)
+	action := "deployment.enqueue"
+	if d.RollbackOf != "" {
+		action = "deployment.rollback"
+	}
+	s.audit(r, "", action, "deployment", d.ID, map[string]string{"application_id": d.ApplicationID})
 	writeJSON(w, http.StatusAccepted, createDeploymentResponse{
 		deploymentResponse: deploymentResponseFrom(d),
 		JobID:              jobID,
@@ -225,6 +225,10 @@ func (s *Server) listDeployments(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
+
+	if _, ok := s.requireProject(w, r, projectID); !ok {
+		return
+	}
 
 	list, err := s.Deployments.ListDeploymentsByProject(ctx, projectID)
 	if err != nil {
@@ -264,6 +268,9 @@ func (s *Server) getDeployment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to get deployment")
 		return
 	}
+	if !s.actorOwnsProject(w, r, d.ProjectID, "deployment not found") {
+		return
+	}
 	writeJSON(w, http.StatusOK, deploymentResponseFrom(d))
 }
 
@@ -300,15 +307,18 @@ func (s *Server) rollbackDeployment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to roll back")
 		return
 	}
+	if !s.actorOwnsProject(w, r, source.ProjectID, "deployment not found") {
+		return
+	}
 	if strings.TrimSpace(source.ImageName) == "" {
 		writeError(w, http.StatusConflict, "that deployment has no image to roll back to")
 		return
 	}
 
-	s.enqueueRollback(w, ctx, source)
+	s.enqueueRollback(w, r, ctx, source)
 }
 
-func (s *Server) enqueueRollback(w http.ResponseWriter, ctx context.Context, source store.Deployment) {
+func (s *Server) enqueueRollback(w http.ResponseWriter, r *http.Request, ctx context.Context, source store.Deployment) {
 	list, err := s.Deployments.ListDeploymentsByApplication(ctx, source.ApplicationID)
 	if err != nil {
 		s.logger().Error("list deployments before rollback failed", "err", err)
@@ -352,5 +362,5 @@ func (s *Server) enqueueRollback(w http.ResponseWriter, ctx context.Context, sou
 		writeError(w, http.StatusInternalServerError, "failed to roll back")
 		return
 	}
-	s.enqueueQueued(w, ctx, d)
+	s.enqueueQueued(w, r, ctx, d)
 }
