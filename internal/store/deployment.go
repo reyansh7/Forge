@@ -47,28 +47,32 @@ func (s Status) InProgress() bool {
 // ImageName / BuildLog / RollbackOf are Phase 2: history and rollback
 // need an artifact that survives after the container is removed.
 // LocalHost is denormalized from applications at read time (JOIN) so
-// Caddy can emit a Host route without a second query.
+// Caddy can emit a Host route without a second query. NodeID is which
+// worker was asked to run this attempt. NodeAdvertiseHost is joined
+// from nodes so Caddy can reach a published port on that machine.
 type Deployment struct {
-	ID            string
-	ProjectID     string
-	ApplicationID string
-	Status        Status
-	FailedStage   string
-	ErrorMessage  string
-	RuntimeKind   string
-	RuntimeType   string
-	PortSource    string
-	HostPort      int
-	ListenPort    int
-	ContainerID   string
-	ContainerName string
-	PublicURL     string
-	ImageName     string
-	BuildLog      string
-	RollbackOf    string
-	LocalHost     string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID                string
+	ProjectID         string
+	ApplicationID     string
+	Status            Status
+	FailedStage       string
+	ErrorMessage      string
+	RuntimeKind       string
+	RuntimeType       string
+	PortSource        string
+	HostPort          int
+	ListenPort        int
+	ContainerID       string
+	ContainerName     string
+	PublicURL         string
+	ImageName         string
+	BuildLog          string
+	RollbackOf        string
+	LocalHost         string
+	NodeID            string
+	NodeAdvertiseHost string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // DurationMS is wall time from create to last status write.
@@ -186,23 +190,28 @@ func (p *Postgres) ListDeploymentsByApplication(ctx context.Context, application
 	return scanDeployments(rows)
 }
 
-// ListLiveDeployments is the Caddy input: every currently routed app.
-// ListInterruptedDeployments is every pipeline row past queued.
-//
-// Queued still has a Redis job the worker can run. Detecting/building/…
-// means the previous process already dequeued the job and died; those
-// rows block Deploy until they are failed.
-func (p *Postgres) ListInterruptedDeployments(ctx context.Context) ([]Deployment, error) {
+// ListInterruptedDeployments is every pipeline row past queued on one
+// node. Queued still has a Redis job. Detecting/building/… means the
+// previous worker already dequeued and died. A second node must not
+// fail the first node's in-flight work. Empty nodeID is rejected.
+func (p *Postgres) ListInterruptedDeployments(ctx context.Context, nodeID string) ([]Deployment, error) {
+	nodeID, err := ParseUUID(nodeID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := p.db.QueryContext(ctx, deploymentSelect+`
 		WHERE d.status IN ('detecting','building','provisioning','deploying','health_check')
+		  AND d.node_id = $1::uuid
 		ORDER BY d.created_at ASC
-	`)
+	`, nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("list in-progress deployments: %w", err)
 	}
 	defer rows.Close()
 	return scanDeployments(rows)
 }
+
+// ListLiveDeployments is the Caddy input: every currently routed app.
 
 func (p *Postgres) ListLiveDeployments(ctx context.Context) ([]Deployment, error) {
 	rows, err := p.db.QueryContext(ctx, deploymentSelect+`
@@ -243,9 +252,10 @@ func (p *Postgres) UpdateDeployment(ctx context.Context, d Deployment) error {
 			listen_port = COALESCE(NULLIF($12, 0), listen_port),
 			runtime_type = COALESCE(NULLIF($13, ''), runtime_type),
 			port_source = COALESCE(NULLIF($14, ''), port_source),
+			node_id = COALESCE(NULLIF($15, '')::uuid, node_id),
 			updated_at = now()
 		WHERE id = $1::uuid
-	`, id, d.Status, d.FailedStage, d.ErrorMessage, d.RuntimeKind, d.HostPort, d.ContainerID, d.PublicURL, d.ImageName, d.BuildLog, d.ContainerName, d.ListenPort, d.RuntimeType, d.PortSource)
+	`, id, d.Status, d.FailedStage, d.ErrorMessage, d.RuntimeKind, d.HostPort, d.ContainerID, d.PublicURL, d.ImageName, d.BuildLog, d.ContainerName, d.ListenPort, d.RuntimeType, d.PortSource, d.NodeID)
 	if err != nil {
 		return fmt.Errorf("update deployment: %w", err)
 	}
@@ -259,7 +269,8 @@ const deploymentReturning = `
 	COALESCE(public_url, ''), COALESCE(image_name, ''), COALESCE(build_log, ''),
 	COALESCE(rollback_of::text, ''), created_at, updated_at,
 	COALESCE(container_name, ''), COALESCE(listen_port, 0),
-	COALESCE(runtime_type, ''), COALESCE(port_source, '')
+	COALESCE(runtime_type, ''), COALESCE(port_source, ''),
+	COALESCE(node_id::text, '')
 `
 
 const deploymentSelect = `
@@ -271,9 +282,12 @@ const deploymentSelect = `
 	       COALESCE(d.rollback_of::text, ''), d.created_at, d.updated_at,
 	       COALESCE(d.container_name, ''), COALESCE(d.listen_port, 0),
 	       COALESCE(d.runtime_type, ''), COALESCE(d.port_source, ''),
-	       COALESCE(a.local_host, '')
+	       COALESCE(d.node_id::text, ''),
+	       COALESCE(a.local_host, ''),
+	       COALESCE(n.advertise_host, '')
 	FROM deployments d
 	JOIN applications a ON a.id = d.application_id
+	LEFT JOIN nodes n ON n.id = d.node_id
 `
 
 func scanInsertedDeployment(row *sql.Row) (Deployment, error) {
@@ -321,11 +335,12 @@ func deploymentInsertDest(d *Deployment) []any {
 		&d.RuntimeKind, &d.HostPort, &d.ContainerID, &d.PublicURL, &d.ImageName, &d.BuildLog,
 		&d.RollbackOf, &d.CreatedAt, &d.UpdatedAt,
 		&d.ContainerName, &d.ListenPort, &d.RuntimeType, &d.PortSource,
+		&d.NodeID,
 	}
 }
 
 func deploymentSelectDest(d *Deployment) []any {
-	return append(deploymentInsertDest(d), &d.LocalHost)
+	return append(deploymentInsertDest(d), &d.LocalHost, &d.NodeAdvertiseHost)
 }
 
 // CountInProgressByOwner is the Phase 5 deploy-concurrency quota.

@@ -39,6 +39,24 @@ func TestMemoryEnqueueRejectsEmptyType(t *testing.T) {
 	}
 }
 
+func TestDirectedEnqueueOn(t *testing.T) {
+	d := NewDirected()
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	if err := d.EnqueueOn(context.Background(), id, Job{ID: "1", Type: TypeExample}); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.JobsOn(id)) != 1 {
+		t.Fatal("expected one job")
+	}
+	other := "bbbbbbbb-bbbb-4000-8000-000000000002"
+	if len(d.JobsOn(other)) != 0 {
+		t.Fatal("lists must stay isolated")
+	}
+	if err := d.EnqueueOn(context.Background(), "not-a-uuid", Job{ID: "2", Type: TypeExample}); err == nil {
+		t.Fatal("expected invalid node id")
+	}
+}
+
 func TestMemoryDequeueWaitsUntilEnqueue(t *testing.T) {
 	q := NewMemory()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

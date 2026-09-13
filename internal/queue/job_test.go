@@ -34,6 +34,23 @@ func TestParseJobRejectsMissingType(t *testing.T) {
 	}
 }
 
+func TestNodeKey(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	got, err := NodeKey(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != DefaultKey+":"+id {
+		t.Fatalf("got %q", got)
+	}
+	if _, err := NodeKey("forge:jobs:other"); err == nil {
+		t.Fatal("expected invalid node id")
+	}
+	if _, err := NodeKey(""); err == nil {
+		t.Fatal("expected invalid node id")
+	}
+}
+
 func TestAllowedType(t *testing.T) {
 	if !AllowedType(TypeExample) || !AllowedType(TypeDeploy) {
 		t.Fatal("example and deploy must be allowed")

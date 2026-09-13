@@ -11,3 +11,9 @@ type JobQueue interface {
 	Enqueue(ctx context.Context, job Job) error
 	Dequeue(ctx context.Context) (Job, error)
 }
+
+// DirectedSink RPUSH's onto one node's list. Placement lives in
+// internal/schedule; this type only names the key.
+type DirectedSink interface {
+	EnqueueOn(ctx context.Context, nodeID string, job Job) error
+}

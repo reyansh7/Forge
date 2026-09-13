@@ -37,6 +37,7 @@ export type Deployment = {
   build_log?: string;
   rollback_of?: string;
   local_host?: string;
+  node_id?: string;
   duration_ms?: number;
   created_at: string;
   updated_at: string;
@@ -327,10 +328,36 @@ export type ObserveMetrics = {
   last_deploy_duration_ms: number;
   containers_running: number;
   containers_checked: number;
+  nodes_ready: number;
+  nodes_dead: number;
+};
+
+export type WorkerNode = {
+  id: string;
+  name: string;
+  status: string;
+  advertise_host?: string;
+  join_token?: string;
+  in_progress: number;
+  last_seen_at?: string;
+  created_at: string;
+  updated_at: string;
 };
 
 export function getMetrics(): Promise<ObserveMetrics> {
   return apiFetch("/forge-api/metrics").then((r) => parse<ObserveMetrics>(r));
+}
+
+export function listNodes(): Promise<WorkerNode[]> {
+  return apiFetch("/forge-api/nodes").then((r) => parse<WorkerNode[]>(r));
+}
+
+export function createNode(name: string, advertiseHost = ""): Promise<WorkerNode> {
+  return apiFetch("/forge-api/nodes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, advertise_host: advertiseHost }),
+  }).then((r) => parse<WorkerNode>(r));
 }
 
 export function getApplicationLogs(applicationId: string, tail = 100): Promise<AppLogs> {

@@ -21,6 +21,7 @@ import (
 	"github.com/reyansh7/Forge/internal/proxy"
 	"github.com/reyansh7/Forge/internal/queue"
 	"github.com/reyansh7/Forge/internal/runtime"
+	"github.com/reyansh7/Forge/internal/schedule"
 	"github.com/reyansh7/Forge/internal/secrets"
 	"github.com/reyansh7/Forge/internal/store"
 )
@@ -76,6 +77,13 @@ func run(log *slog.Logger) error {
 	}
 	pg.SetCrypter(box)
 
+	// The reserved "local" node lets the first laptop worker join
+	// without POST /nodes. Jobs wait on forge:jobs:{local-id} until
+	// that process claims and BLPOP's.
+	if _, err := pg.EnsureLocalNode(ctx); err != nil {
+		return err
+	}
+
 	if n, err := pg.PruneOldBuildLogs(ctx, time.Duration(cfg.LogRetentionDays)*24*time.Hour); err != nil {
 		log.Error("prune build logs failed", "err", err)
 	} else if n > 0 {
@@ -87,8 +95,9 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	// Redis LIST queue for POST /jobs and POST /projects/{id}/deployments.
-	// Health still uses RedisPinger (PING). The handler never issues RPUSH.
+	// Redis client used as JobQueue (legacy Enqueue) and JobSink
+	// (EnqueueOn). Production deploys always Place then RPUSH
+	// forge:jobs:{node_id}. HTTP tests leave Placer/Sink nil.
 	jobs, err := queue.NewRedis(cfg.RedisURL, queue.DefaultKey)
 	if err != nil {
 		return err
@@ -102,6 +111,9 @@ func run(log *slog.Logger) error {
 		Apps:          pg,
 		Deployments:   pg,
 		Jobs:          jobs,
+		Nodes:         pg,
+		Placer:        &schedule.Scheduler{Nodes: pg, MaxInflight: cfg.MaxInflightPerNode},
+		Sink:          jobs,
 		Runtime:       runtime.HostDocker{},
 		Router:        proxy.Caddy{AdminURL: cfg.CaddyAdminURL, UpstreamHost: cfg.CaddyUpstreamHost},
 		Auth:          pg,
@@ -110,6 +122,7 @@ func run(log *slog.Logger) error {
 		Limits: httpapi.Limits{
 			MaxProjectsPerOwner: cfg.MaxProjectsPerOwner,
 			MaxInflightDeploys:  cfg.MaxInflightDeploys,
+			MaxInflightPerNode:  cfg.MaxInflightPerNode,
 		},
 	}
 

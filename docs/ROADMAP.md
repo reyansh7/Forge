@@ -38,8 +38,8 @@ Future-phase work must not be implemented merely because it is known to be requi
 
 | Kind | Phases | Meaning |
 |------|--------|---------|
-| **CURRENT** | 0, 1, 2, 3, 4, 5 | Implemented. Local loopback PaaS with operator auth, observability, TLS opt-in, quotas, and backup. |
-| **NEXT** | 6 | Next authorized work only after `START PHASE 6`. |
+| **CURRENT** | 0, 1, 2, 3, 4, 5, 6 | Implemented. Local loopback PaaS with operator auth, observability, TLS opt-in, quotas, backup, and a second worker node. |
+| **NEXT** | 7 | Next authorized work only after `START PHASE 7`. |
 | **FUTURE** | 7–10 | Documented sequence. Not authorized. |
 
 Security requirements apply in every phase. Phases 3 and 5 add **depth**; they do not mark the start of security.
@@ -53,7 +53,7 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 3 Security hardening        COMPLETE
 4 Observability             COMPLETE
 5 Production hardening      COMPLETE
-6 Multi-node infrastructure
+6 Multi-node infrastructure   COMPLETE
 7 Advanced platform
 8 Cloud / AWS readiness
 9 High availability / scaling
@@ -299,7 +299,7 @@ Multi-node, ACME on a public hostname, team vault product, `0.0.0.0` as the defa
 
 ## 9. Phase 6 — Multi-Node Infrastructure
 
-**Status: FUTURE.** Do not implement until `START PHASE 6`.
+**Status: COMPLETE** (authorized `START PHASE 6`)
 
 ### Objective
 
@@ -309,9 +309,9 @@ More than one worker/runtime node without rewriting the control plane.
 
 Phase 5. A scheduler is useless if the API is still a loopback toy without backups.
 
-### Capabilities
+### Capabilities (implemented)
 
-Worker registration, node health, placement, capacity, failure handling, workload migration **concepts** implemented incrementally.
+Worker registration (`POST /nodes` join token), node heartbeat and stale → `dead`, scheduler placement (`internal/schedule`), per-node Redis LIST + inflight cap, node-scoped abandon of interrupted deploys, Caddy `advertise_host`, Observe node list. Workload move is Stop + Deploy (not live migrate). No AWS, no Kubernetes, no overlay mesh.
 
 ```text
 Control Plane
@@ -328,9 +328,9 @@ Node Node Node
 
 Node join must be authenticated. Workloads still cannot reach other tenants or the control plane. Network policies between nodes are explicit.
 
-### Verification / exit criteria
+### Verification / exit criteria (met)
 
-A second node can run a deploy the API requested. Failure of one node does not require deleting PostgreSQL. No AWS required for this phase (local or lab VMs are enough).
+A second worker process (`FORGE_NODE_NAME` + join token) consumes `forge:jobs:{id}` and can run a deploy the API placed. Marking a node `dead` does not drop PostgreSQL. Lab: two `go run ./cmd/worker` processes on one machine. No AWS.
 
 ---
 
@@ -495,7 +495,7 @@ Before moving forward:
 
 **Phase 5 — COMPLETE** (authorized `START PHASE 5`)
 
-**Phase 6 — FUTURE.** Do not start until the developer says `START PHASE 6`.
+**Phase 6 — COMPLETE** (authorized `START PHASE 6`)
 
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
@@ -514,6 +514,8 @@ Phase 3 (done): operator bootstrap/login; project `owner_id`; session cookies/be
 Phase 4 (done): structured API/worker logs; authorized SSE log follow; `/metrics` + `/observe`; deploy `duration_ms`. Not tracing, not alerts, not TLS.
 
 Phase 5 (done): opt-in API TLS; Caddy `tls internal` on `127.0.0.1:9443`; env AES-GCM at rest; project/deploy/workspace/log quotas; deploy rate limit; `cmd/backup`; `docs/DISASTER_RECOVERY.md` + `docs/UPGRADES.md`; `FORGE_ALLOW_PUBLIC_BIND` for `0.0.0.0`. Still one node. Not ACME, not a vault, not multi-node.
+
+Phase 6 (done): `nodes` table; `EnsureLocalNode`; join token; heartbeat / stale → dead; `internal/schedule`; `forge:jobs:{node_id}`; Caddy advertise host; Observe nodes. Not live migrate, not AWS, not Phase 7 service graphs.
 
 ---
 

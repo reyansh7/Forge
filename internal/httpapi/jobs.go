@@ -3,10 +3,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/reyansh7/Forge/internal/queue"
+	"github.com/reyansh7/Forge/internal/schedule"
 )
 
 // JobQueue is the HTTP → Redis boundary for increment 0.3.
@@ -66,7 +68,11 @@ func (s *Server) enqueueJob(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	if err := s.Jobs.Enqueue(ctx, job); err != nil {
+	if _, err := s.enqueuePlaced(ctx, job); err != nil {
+		if errors.Is(err, schedule.ErrNoCapacity) {
+			writeError(w, http.StatusConflict, "no ready worker node with capacity")
+			return
+		}
 		s.logger().Error("enqueue job failed", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "failed to enqueue job")
 		return

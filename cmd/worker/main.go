@@ -10,10 +10,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/reyansh7/Forge/internal/config"
 	"github.com/reyansh7/Forge/internal/deploy"
@@ -60,13 +62,36 @@ func run(log *slog.Logger) error {
 	}
 	pg.SetCrypter(box)
 
-	q, err := queue.NewRedis(cfg.RedisURL, queue.DefaultKey)
+	nodeName := cfg.NodeName
+	if nodeName == "" {
+		nodeName = store.DefaultNodeName
+	}
+	// local is created here too so a worker started before the API
+	// can still claim. Named nodes must already exist (POST /nodes).
+	if nodeName == store.DefaultNodeName {
+		if _, err := pg.EnsureLocalNode(ctx); err != nil {
+			return err
+		}
+	}
+	node, err := pg.ClaimNode(ctx, nodeName, cfg.NodeToken, cfg.NodeAdvertiseHost)
+	if err != nil {
+		// Name the node: a leftover FORGE_NODE_NAME in the shell is a
+		// common "I ran go run ./cmd/worker" failure. Do not log the token.
+		return fmt.Errorf("claim node %q: %w", nodeName, err)
+	}
+	key, err := queue.NodeKey(node.ID)
+	if err != nil {
+		return err
+	}
+	q, err := queue.NewRedis(cfg.RedisURL, key)
 	if err != nil {
 		return err
 	}
 	if err := q.Ping(ctx); err != nil {
 		return err
 	}
+
+	go heartbeatNode(ctx, log, pg, node.ID, cfg.NodeAdvertiseHost)
 
 	deployHandler := deploy.Handler{
 		Log:               log,
@@ -82,7 +107,7 @@ func run(log *slog.Logger) error {
 
 	// A killed worker leaves rows in BUILDING. Those block Deploy until
 	// someone Stops. Close them here so a restart unsticks the app.
-	if stale, err := pg.ListInterruptedDeployments(ctx); err != nil {
+	if stale, err := pg.ListInterruptedDeployments(ctx, node.ID); err != nil {
 		log.Error("list in-progress deployments failed", "err", err)
 	} else {
 		docker := runtime.HostDocker{}
@@ -110,9 +135,30 @@ func run(log *slog.Logger) error {
 		log.Error("caddy reconcile failed", "err", err)
 	}
 
-	log.Info("worker consuming", "queue_key", queue.DefaultKey)
+	log.Info("worker consuming", "node", node.Name, "node_id", node.ID, "queue_key", key)
 	return worker.Run(ctx, q, worker.Dispatcher{
 		Example: worker.ExampleHandler{Log: log},
 		Deploy:  deployHandler,
 	}, log)
+}
+
+// heartbeatNode keeps last_seen_at fresh so the scheduler does not
+// mark this process dead. Interval is one-third of NodeStaleAfter so
+// a single missed tick is not fatal. Never logs the join token.
+func heartbeatNode(ctx context.Context, log *slog.Logger, pg *store.Postgres, id, advertiseHost string) {
+	t := time.NewTicker(store.NodeHeartbeatEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			hbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			_, err := pg.HeartbeatNode(hbCtx, id, advertiseHost)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				log.Error("node heartbeat failed", "err", err, "node_id", id)
+			}
+		}
+	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/reyansh7/Forge/internal/queue"
 	"github.com/reyansh7/Forge/internal/runtime"
+	"github.com/reyansh7/Forge/internal/schedule"
 	"github.com/reyansh7/Forge/internal/store"
 )
 
@@ -47,6 +48,7 @@ type deploymentResponse struct {
 	BuildLog      string    `json:"build_log,omitempty"`
 	RollbackOf    string    `json:"rollback_of,omitempty"`
 	LocalHost     string    `json:"local_host,omitempty"`
+	NodeID        string    `json:"node_id,omitempty"`
 	DurationMS    int64     `json:"duration_ms"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -72,6 +74,7 @@ func deploymentResponseFrom(d store.Deployment) deploymentResponse {
 		BuildLog:      d.BuildLog,
 		RollbackOf:    d.RollbackOf,
 		LocalHost:     d.LocalHost,
+		NodeID:        d.NodeID,
 		DurationMS:    d.DurationMS(),
 		CreatedAt:     d.CreatedAt.UTC(),
 		UpdatedAt:     d.UpdatedAt.UTC(),
@@ -230,7 +233,27 @@ func (s *Server) enqueueQueued(w http.ResponseWriter, r *http.Request, ctx conte
 		Payload: payload,
 	}
 
-	if err := s.Jobs.Enqueue(ctx, job); err != nil {
+	placed, err := s.placeDeployment(ctx, d)
+	if err != nil {
+		if errors.Is(err, schedule.ErrNoCapacity) {
+			s.failQueuedDeploy(ctx, d, err.Error())
+			writeError(w, http.StatusConflict, "no ready worker node with capacity")
+			return
+		}
+		s.logger().Error("place deploy failed", "err", err)
+		s.failQueuedDeploy(ctx, d, "failed to place deployment")
+		writeError(w, http.StatusServiceUnavailable, "failed to place deployment")
+		return
+	}
+	d = placed
+
+	if d.NodeID != "" && s.Sink != nil {
+		if err := s.Sink.EnqueueOn(ctx, d.NodeID, job); err != nil {
+			s.logger().Error("enqueue deploy failed", "err", err)
+			writeError(w, http.StatusServiceUnavailable, "failed to enqueue deployment")
+			return
+		}
+	} else if err := s.Jobs.Enqueue(ctx, job); err != nil {
 		s.logger().Error("enqueue deploy failed", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "failed to enqueue deployment")
 		return

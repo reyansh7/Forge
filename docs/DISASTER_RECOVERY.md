@@ -1,6 +1,6 @@
-# Forge disaster recovery (single node)
+# Forge disaster recovery
 
-This is the Phase 5 runbook for **one machine**. Multi-region DR is Phase 10. Do not treat this file as permission to bind the API on the public Internet.
+This is the Phase 5–6 runbook for the control plane on **one machine**. A second worker is not a second Postgres. Multi-region DR is Phase 10. Do not treat this file as permission to bind the API on the public Internet.
 
 Backups are **secrets**. They contain user rows and sealed env values. Keep them off git. Do not paste dump contents into chat.
 
@@ -9,7 +9,7 @@ Backups are **secrets**. They contain user rows and sealed env values. Keep them
 | Store | Role | If it disappears |
 |-------|------|------------------|
 | PostgreSQL | Users, sessions, projects, apps, env (sealed), deployments, audit, schema_migrations | Control plane is gone until restore |
-| Redis LIST `forge:jobs` | Transient queue only | Queued jobs that were never popped are lost. Rows in `deployments` stay. Re-queue a deploy from the dashboard or API |
+| Redis LIST `forge:jobs:{node_id}` | Transient per-node queue | Queued jobs that were never popped are lost. Rows in `deployments` stay. Re-queue a deploy from the dashboard or API |
 | `.forge/data.key` | AES-256-GCM key for env cells | Sealed env cannot be opened. A new key does **not** decrypt old rows |
 | Docker images / containers | Workload artifacts | Rebuild from git. Rollback still works if `image_name` is on the row and the image is still on the host |
 | Caddy in-memory config | LIVE routes | Worker start re-applies LIVE rows. No Caddy dump required |
@@ -57,7 +57,11 @@ Do not run restore against a database you are not willing to overwrite.
 
 ## Redis-loss behavior
 
-A Redis restart empties `forge:jobs`. PostgreSQL still has `queued` / in-progress rows. The worker will not see those jobs until someone enqueues again. That is accepted in this phase. Do not promote Redis to a durable workflow engine.
+A Redis restart empties every `forge:jobs:{node_id}` list. PostgreSQL still has `queued` / in-progress rows. The worker will not see those jobs until someone enqueues again. That is accepted in this phase. Do not promote Redis to a durable workflow engine.
+
+## Worker node death
+
+A worker that stops heartbeating is marked `dead` (~45s). **Do not drop or restore PostgreSQL for that.** In-flight rows on that node stay until someone Stops them or that worker restarts and abandons its own interrupted rows. Place new work on another ready node with Deploy. Live container move is not implemented.
 
 ## TLS and bind after recovery
 

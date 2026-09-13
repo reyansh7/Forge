@@ -84,6 +84,20 @@ func (q *Redis) Ping(ctx context.Context) error {
 
 // Enqueue RPUSHes the JSON job. A dial/write failure is returned to HTTP as 503.
 func (q *Redis) Enqueue(ctx context.Context, job Job) error {
+	return q.rpush(ctx, q.key, job)
+}
+
+// EnqueueOn RPUSH's forge:jobs:{nodeID}. The worker on that node is
+// the only consumer. A bad nodeID is rejected before dial.
+func (q *Redis) EnqueueOn(ctx context.Context, nodeID string, job Job) error {
+	key, err := NodeKey(nodeID)
+	if err != nil {
+		return err
+	}
+	return q.rpush(ctx, key, job)
+}
+
+func (q *Redis) rpush(ctx context.Context, key string, job Job) error {
 	raw, err := job.Marshal()
 	if err != nil {
 		return err
@@ -93,7 +107,7 @@ func (q *Redis) Enqueue(ctx context.Context, job Job) error {
 		return err
 	}
 	defer conn.Close()
-	v, err := q.command(br, conn, "RPUSH", q.key, string(raw))
+	v, err := q.command(br, conn, "RPUSH", key, string(raw))
 	if err != nil {
 		return fmt.Errorf("redis RPUSH: %w", err)
 	}

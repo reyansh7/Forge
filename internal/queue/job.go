@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -27,8 +28,23 @@ const TypeExample = "example"
 // a control-plane deployment_id, never a shell command.
 const TypeDeploy = "deploy"
 
-// DefaultKey is the Redis LIST name shared by the API and worker.
+// DefaultKey is the legacy single-list name. Phase 6 workers consume
+// NodeKey(id) instead so two processes cannot steal each other's jobs.
 const DefaultKey = "forge:jobs"
+
+// nodeIDPattern matches a UUID so a node id cannot inject a second
+// Redis key (CRLF, spaces, or "forge:jobs:other").
+var nodeIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// NodeKey is the LIST one worker BLPOP's. The API RPUSH's here after
+// Place() so a job cannot land on a node that never claimed it.
+func NodeKey(nodeID string) (string, error) {
+	id := strings.ToLower(strings.TrimSpace(nodeID))
+	if !nodeIDPattern.MatchString(id) {
+		return "", fmt.Errorf("invalid node id")
+	}
+	return DefaultKey + ":" + id, nil
+}
 
 var (
 	// ErrEmpty means a blocking pop timed out with nothing on the list.

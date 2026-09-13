@@ -17,7 +17,9 @@ Forge applies SQL from `internal/store/migrations/` at process start (`Postgres.
 3. Run `go test ./internal/store/...` against Compose Postgres.
 4. Note the new filename in the phase docs if behavior changed.
 
-`GET /operator/status` (session required) lists applied filenames so you can see drift between nodes. Phase 5 is still one node; the list is for the operator, not a cluster.
+`GET /operator/status` (session required) lists applied filenames so you can see drift. Phase 6 workers share the same migration set; they are not independent schemas.
+
+`0008_nodes.sql` adds `nodes` and `deployments.node_id`. Restart API and worker so both migrate. Existing queued jobs on the old `forge:jobs` list are not consumed — re-enqueue after upgrade.
 
 ## Env encryption and upgrades
 
@@ -27,6 +29,7 @@ Losing `.forge/data.key` is not a schema problem. It is a secret-loss problem. A
 
 ## What this is not
 
-- Not a multi-node rolling upgrade (Phase 6+).
+- Not a rolling upgrade of two API processes (still one control plane).
+- Not live container migration when a worker dies.
 - Not an automatic down-migration.
 - Not permission to rewrite history of applied files on a live database.

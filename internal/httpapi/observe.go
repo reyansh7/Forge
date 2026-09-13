@@ -75,6 +75,8 @@ type metricsResponse struct {
 	LastDeployDurationMS int64 `json:"last_deploy_duration_ms"`
 	ContainersRunning    int   `json:"containers_running"`
 	ContainersChecked    int   `json:"containers_checked"`
+	NodesReady           int   `json:"nodes_ready"`
+	NodesDead            int   `json:"nodes_dead"`
 }
 
 func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +131,22 @@ func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	if last.ID != "" {
 		out.LastDeployDurationMS = last.DurationMS()
+	}
+	if s.Nodes != nil {
+		nodes, err := s.Nodes.ListNodes(ctx)
+		if err != nil {
+			s.logger().Error("metrics list nodes failed", "err", err)
+			writeError(w, http.StatusInternalServerError, "failed to read metrics")
+			return
+		}
+		for _, n := range nodes {
+			switch n.Status {
+			case store.NodeReady:
+				out.NodesReady++
+			case store.NodeDead:
+				out.NodesDead++
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

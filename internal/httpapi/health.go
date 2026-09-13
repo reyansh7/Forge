@@ -55,6 +55,15 @@ type Server struct {
 	// Metrics is process-local HTTP/enqueue counters (Phase 4).
 	// Deploy history still comes from PostgreSQL at GET /metrics time.
 	Metrics *observe.Metrics
+	// Nodes is unused by /health. POST/GET /nodes and deploy placement
+	// persist node_id. Tests leave this nil so Jobs.Enqueue stays on
+	// the shared list.
+	Nodes NodeRegistry
+	// Placer is unused by /health. When set with Sink, deploys go to
+	// one node's Redis list. Placement logic lives in internal/schedule.
+	Placer Placer
+	// Sink is unused by /health. Directed RPUSH; tests inject queue.Directed.
+	Sink JobSink
 	// Limits is Phase 5 operator quotas. Zero fields use defaults.
 	Limits Limits
 	// SecureCookies is set when the API serves TLS so forge_session
@@ -71,6 +80,7 @@ type Server struct {
 type Limits struct {
 	MaxProjectsPerOwner int
 	MaxInflightDeploys  int
+	MaxInflightPerNode  int
 }
 
 // SchemaLister is the HTTP → schema_migrations boundary.
@@ -136,6 +146,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /deployments/{id}", s.getDeployment)
 	mux.HandleFunc("POST /deployments/{id}/rollback", s.rollbackDeployment)
 	mux.HandleFunc("POST /jobs", s.enqueueJob)
+	mux.HandleFunc("GET /nodes", s.listNodes)
+	mux.HandleFunc("POST /nodes", s.createNode)
 	return stripDashboardPrefix(s.withObserve(s.withAuth(mux)))
 }
 

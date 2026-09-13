@@ -56,6 +56,12 @@ func TestLoadWorkerRequiresDatabaseAndRedis(t *testing.T) {
 	if cfg.CaddyAdminURL != "http://127.0.0.1:2019" {
 		t.Fatalf("CaddyAdminURL = %q", cfg.CaddyAdminURL)
 	}
+	if cfg.NodeName != DefaultNodeName {
+		t.Fatalf("NodeName = %q, want %q", cfg.NodeName, DefaultNodeName)
+	}
+	if cfg.MaxInflightPerNode != DefaultMaxInflightPerNode {
+		t.Fatalf("MaxInflightPerNode = %d", cfg.MaxInflightPerNode)
+	}
 }
 
 func TestLoadRejectsUnspecifiedBind(t *testing.T) {

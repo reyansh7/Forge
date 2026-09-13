@@ -29,6 +29,13 @@ func (s *Server) inflightQuota() int {
 	return config.DefaultMaxInflightDeploys
 }
 
+func (s *Server) nodeInflightQuota() int {
+	if s.Limits.MaxInflightPerNode > 0 {
+		return s.Limits.MaxInflightPerNode
+	}
+	return config.DefaultMaxInflightPerNode
+}
+
 func (s *Server) deployAttempts() *attemptGate {
 	if s.deployGate == nil {
 		s.deployGate = newAttemptGate(10, 10*time.Minute)
@@ -41,6 +48,7 @@ type operatorStatusResponse struct {
 	TLSEnabled          bool     `json:"tls_enabled"`
 	MaxProjectsPerOwner int      `json:"max_projects_per_owner"`
 	MaxInflightDeploys  int      `json:"max_inflight_deploys"`
+	MaxInflightPerNode  int      `json:"max_inflight_per_node"`
 }
 
 // operatorStatus is GET /operator/status.
@@ -58,6 +66,7 @@ func (s *Server) operatorStatus(w http.ResponseWriter, r *http.Request) {
 		TLSEnabled:          s.SecureCookies,
 		MaxProjectsPerOwner: s.projectQuota(),
 		MaxInflightDeploys:  s.inflightQuota(),
+		MaxInflightPerNode:  s.nodeInflightQuota(),
 	}
 	if s.Schemas != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)

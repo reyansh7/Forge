@@ -59,16 +59,26 @@ type Config struct {
 
 	MaxProjectsPerOwner int
 	MaxInflightDeploys  int
+	MaxInflightPerNode  int
 	LogRetentionDays    int
 	AllowPublicBind     bool
+
+	// NodeName is which worker this process claims (default "local").
+	// NodeToken is the one-time join token except for the reserved local node.
+	// NodeAdvertiseHost is how Caddy reaches published ports on this machine.
+	NodeName          string
+	NodeToken         string
+	NodeAdvertiseHost string
 }
 
 const (
 	DefaultMaxProjects        = 20
 	DefaultMaxInflightDeploys = 2
+	DefaultMaxInflightPerNode = 4
 	DefaultLogRetentionDays   = 14
 	DefaultWorkspaceMaxBytes  = 256 << 20
 	defaultDataKeyFile        = ".forge/data.key"
+	DefaultNodeName           = "local"
 )
 
 // Load reads FORGE_* environment variables into Config.
@@ -117,8 +127,12 @@ func common() Config {
 		DataKeyFile:         getenv("FORGE_DATA_KEY_FILE", defaultDataKeyFile),
 		MaxProjectsPerOwner: getenvInt("FORGE_MAX_PROJECTS_PER_OWNER", DefaultMaxProjects),
 		MaxInflightDeploys:  getenvInt("FORGE_MAX_INFLIGHT_DEPLOYS", DefaultMaxInflightDeploys),
+		MaxInflightPerNode:  getenvInt("FORGE_MAX_INFLIGHT_PER_NODE", DefaultMaxInflightPerNode),
 		LogRetentionDays:    getenvInt("FORGE_LOG_RETENTION_DAYS", DefaultLogRetentionDays),
 		AllowPublicBind:     getenv("FORGE_ALLOW_PUBLIC_BIND", "") == "1",
+		NodeName:            getenv("FORGE_NODE_NAME", DefaultNodeName),
+		NodeToken:           getenv("FORGE_NODE_TOKEN", ""),
+		NodeAdvertiseHost:   getenv("FORGE_NODE_ADVERTISE_HOST", ""),
 	}
 }
 

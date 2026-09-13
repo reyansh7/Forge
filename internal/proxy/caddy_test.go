@@ -71,6 +71,19 @@ func TestRenderCaddyfileRecoversSlugFromPublicURL(t *testing.T) {
 	}
 }
 
+func TestRenderCaddyfileUsesNodeAdvertiseHost(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	raw := string(RenderCaddyfile("host.docker.internal", []store.Deployment{
+		{ID: id, HostPort: 49152, NodeAdvertiseHost: "192.168.1.10"},
+	}))
+	if !strings.Contains(raw, "192.168.1.10:49152") {
+		t.Fatalf("missing node upstream: %s", raw)
+	}
+	if strings.Count(raw, "host.docker.internal:49152") != 0 {
+		t.Fatalf("must not use fallback when advertise_host is set: %s", raw)
+	}
+}
+
 func TestHostPublicURL(t *testing.T) {
 	got := HostPublicURL("http://127.0.0.1:9080/", "hello")
 	if got != "http://hello.localhost:9080/" {

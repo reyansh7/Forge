@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -97,7 +98,7 @@ func writeAppRoutes(b *bytes.Buffer, upstreamHost string, live []store.Deploymen
 		if _, err := store.ParseUUID(id); err != nil {
 			continue
 		}
-		upstream := upstreamHost + ":" + strconv.Itoa(d.HostPort)
+		upstream := net.JoinHostPort(deploymentUpstreamHost(upstreamHost, d), strconv.Itoa(d.HostPort))
 		tag := strings.ReplaceAll(id, "-", "")
 		// Optional Host route: http://{slug}.localhost:9080/ → same
 		// container as /d/{id}/. This is local DX, not public DNS.
@@ -155,6 +156,17 @@ func writeAppRoutes(b *bytes.Buffer, upstreamHost string, live []store.Deploymen
 		b.WriteString(upstream)
 		b.WriteString("\n\t}\n")
 	}
+}
+
+// deploymentUpstreamHost prefers the node's advertise_host when the
+// worker published it. Empty means this process shares a Docker host
+// with Caddy (FORGE_CADDY_UPSTREAM_HOST / host.docker.internal).
+func deploymentUpstreamHost(fallback string, d store.Deployment) string {
+	host, err := store.ValidateAdvertiseHost(d.NodeAdvertiseHost)
+	if err != nil || host == "" {
+		return fallback
+	}
+	return host
 }
 
 func slugFromPublicURL(raw string) string {
