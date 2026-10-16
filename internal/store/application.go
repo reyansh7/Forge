@@ -28,8 +28,11 @@ type Application struct {
 	RootDirectory string
 	HealthPath    string
 	LocalHost     string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// BuildPackage is optional, for example ./cmd/api. Empty lets the
+	// detector choose the only main package.
+	BuildPackage string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // ApplicationInput is a validated create/update payload.
@@ -39,6 +42,7 @@ type ApplicationInput struct {
 	RootDirectory string
 	HealthPath    string
 	LocalHost     string
+	BuildPackage  string
 }
 
 // ValidateApplicationInput matches project URL rules plus a name.
@@ -66,18 +70,23 @@ func (p *Postgres) CreateApplication(ctx context.Context, projectID string, in A
 	if err != nil {
 		return Application{}, err
 	}
+	pkg, err := ValidateBuildPackage(in.BuildPackage)
+	if err != nil {
+		return Application{}, err
+	}
 	in, err = ValidateApplication(in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost)
 	if err != nil {
 		return Application{}, err
 	}
+	in.BuildPackage = pkg
 
 	var out Application
 	err = p.db.QueryRowContext(ctx, `
-		INSERT INTO applications (project_id, name, repository_url, root_directory, health_path, local_host)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6)
-		RETURNING id::text, project_id::text, name, repository_url, root_directory, health_path, local_host, created_at, updated_at
-	`, projectID, in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost).Scan(
-		&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.CreatedAt, &out.UpdatedAt,
+		INSERT INTO applications (project_id, name, repository_url, root_directory, health_path, local_host, build_package)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+		RETURNING id::text, project_id::text, name, repository_url, root_directory, health_path, local_host, build_package, created_at, updated_at
+	`, projectID, in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost, in.BuildPackage).Scan(
+		&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.BuildPackage, &out.CreatedAt, &out.UpdatedAt,
 	)
 	if isUniqueViolation(err) {
 		return Application{}, conflictApplication(err)
@@ -117,18 +126,23 @@ func (p *Postgres) UpdateApplication(ctx context.Context, id string, in Applicat
 	if err != nil {
 		return Application{}, err
 	}
+	pkg, err := ValidateBuildPackage(in.BuildPackage)
+	if err != nil {
+		return Application{}, err
+	}
 	in, err = ValidateApplication(in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost)
 	if err != nil {
 		return Application{}, err
 	}
+	in.BuildPackage = pkg
 	var out Application
 	err = p.db.QueryRowContext(ctx, `
 		UPDATE applications
-		SET name = $2, repository_url = $3, root_directory = $4, health_path = $5, local_host = $6, updated_at = now()
+		SET name = $2, repository_url = $3, root_directory = $4, health_path = $5, local_host = $6, build_package = $7, updated_at = now()
 		WHERE id = $1::uuid
-		RETURNING id::text, project_id::text, name, repository_url, root_directory, health_path, local_host, created_at, updated_at
-	`, id, in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost).Scan(
-		&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.CreatedAt, &out.UpdatedAt,
+		RETURNING id::text, project_id::text, name, repository_url, root_directory, health_path, local_host, build_package, created_at, updated_at
+	`, id, in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost, in.BuildPackage).Scan(
+		&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.BuildPackage, &out.CreatedAt, &out.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Application{}, ErrNotFound
@@ -164,13 +178,14 @@ func (p *Postgres) DeleteApplication(ctx context.Context, id string) error {
 const applicationSelect = `
 	SELECT id::text, project_id::text, name, repository_url,
 	       COALESCE(root_directory, '.'), COALESCE(health_path, '/'), COALESCE(local_host, ''),
+	       COALESCE(build_package, ''),
 	       created_at, updated_at
 	FROM applications
 `
 
 func scanApplication(row *sql.Row) (Application, error) {
 	var out Application
-	err := row.Scan(&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.CreatedAt, &out.UpdatedAt)
+	err := row.Scan(&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.BuildPackage, &out.CreatedAt, &out.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Application{}, ErrNotFound
 	}
@@ -184,7 +199,7 @@ func scanApplications(rows *sql.Rows) ([]Application, error) {
 	out := make([]Application, 0)
 	for rows.Next() {
 		var item Application
-		if err := rows.Scan(&item.ID, &item.ProjectID, &item.Name, &item.RepositoryURL, &item.RootDirectory, &item.HealthPath, &item.LocalHost, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.Name, &item.RepositoryURL, &item.RootDirectory, &item.HealthPath, &item.LocalHost, &item.BuildPackage, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan application: %w", err)
 		}
 		out = append(out, item)

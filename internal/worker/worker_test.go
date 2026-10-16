@@ -133,3 +133,96 @@ func (q *oneShotQueue) Dequeue(ctx context.Context) (queue.Job, error) {
 		return queue.Job{}, q.err
 	}
 }
+
+type overlapHandler struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (h *overlapHandler) Handle(ctx context.Context, _ queue.Job) error {
+	select {
+	case h.started <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-h.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestRunConcurrentOverlapsIndependentJobs(t *testing.T) {
+	q := queue.NewMemory()
+	h := &overlapHandler{started: make(chan struct{}, 2), release: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunConcurrent(ctx, q, h, 2, silentLog())
+	}()
+	for _, id := range []string{"a", "b"} {
+		if err := q.Enqueue(ctx, queue.Job{ID: id, Type: queue.TypeExample}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-h.started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("jobs did not overlap")
+		}
+	}
+	close(h.release)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not stop")
+	}
+}
+
+type deferHandler struct {
+	n atomic.Int32
+}
+
+func (h *deferHandler) Handle(context.Context, queue.Job) error {
+	if h.n.Add(1) == 1 {
+		return queue.ErrDefer
+	}
+	return nil
+}
+
+func TestRunConcurrentRequeuesDeferredJob(t *testing.T) {
+	q := queue.NewMemory()
+	h := &deferHandler{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunConcurrent(ctx, q, h, 1, silentLog())
+	}()
+	if err := q.Enqueue(ctx, queue.Job{ID: "j", Type: queue.TypeExample}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for h.n.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("deferred job ran %d times", h.n.Load())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not stop")
+	}
+}

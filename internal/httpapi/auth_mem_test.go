@@ -104,6 +104,16 @@ func (m *memAuth) insertUserLocked(username, passwordHash string) (store.User, e
 	return u, nil
 }
 
+func (m *memAuth) GetUser(_ context.Context, id string) (store.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[id]
+	if !ok {
+		return store.User{}, store.ErrNotFound
+	}
+	return u, nil
+}
+
 func (m *memAuth) GetUserByUsername(_ context.Context, username string) (store.User, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

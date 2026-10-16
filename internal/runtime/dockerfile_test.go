@@ -14,6 +14,9 @@ func TestPrepareDockerfileWritesGoRecipe(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := prepareDockerfile(dir, string(detect.KindGo)); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +48,7 @@ func TestPrepareDockerfileLeavesUserDockerfile(t *testing.T) {
 }
 
 func TestDockerRunArgsUsesDetectedPort(t *testing.T) {
-	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:3000", nil, 3000)
+	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:3000", nil, 3000, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,8 +17,10 @@ import (
 // On timeout we return ErrEmpty so the worker can check context.Cancel.
 //
 // Limitation: after BLPOP the job is gone from Redis even if the worker
-// crashes before Handle returns. There is no ack, retry, or dead-letter
-// in this increment. Do not treat this as durable job state.
+// crashes before Handle returns. There is no ack or dead-letter queue.
+// A queued row that never got popped is re-queued by the API, which
+// replaces deployments.active_job_id so a leftover list entry is ignored.
+// Do not treat this LIST as durable job state.
 type Redis struct {
 	addr     string
 	password string

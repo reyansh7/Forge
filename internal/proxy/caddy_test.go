@@ -93,3 +93,105 @@ func TestHostPublicURL(t *testing.T) {
 		t.Fatal("empty slug")
 	}
 }
+
+func TestRenderCaddyfilePreviewHost(t *testing.T) {
+	prodID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
+	prevID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
+	raw := string(RenderCaddyfile("host.docker.internal", []store.Deployment{
+		{ID: prodID, HostPort: 49152, LocalHost: "hello", Environment: store.EnvProduction},
+		{ID: prevID, HostPort: 49153, LocalHost: "hello", Environment: store.EnvPreview},
+	}))
+	if !strings.Contains(raw, `header_regexp host (?i)^hello\.localhost(?::\d+)?$`) {
+		t.Fatalf("missing production host: %s", raw)
+	}
+	if !strings.Contains(raw, `header_regexp host (?i)^hello-preview\.localhost(?::\d+)?$`) {
+		t.Fatalf("missing preview host: %s", raw)
+	}
+}
+
+func TestRenderCaddyfileCustomDomainACME(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	raw := string(RenderCaddyfile("host.docker.internal", []store.Deployment{
+		{ID: id, ApplicationID: "bbbbbbbb-bbbb-4000-8000-000000000001", HostPort: 49152, LocalHost: "hello", Environment: store.EnvProduction},
+	}, []store.ApplicationDomain{{
+		ApplicationID: "bbbbbbbb-bbbb-4000-8000-000000000001",
+		Hostname:      "app.example.com",
+		Environment:   store.EnvProduction,
+		Status:        store.DomainActive,
+	}}))
+	if !strings.Contains(raw, "auto_https off") || !strings.Contains(raw, "tls internal") {
+		t.Fatalf("localhost TLS contract changed: %s", raw)
+	}
+	if !strings.Contains(raw, `header_regexp host (?i)^hello\.localhost(?::\d+)?$`) {
+		t.Fatalf(".localhost route must remain: %s", raw)
+	}
+	if !strings.Contains(raw, "https://app.example.com") || !strings.Contains(raw, "issuer acme") {
+		t.Fatalf("missing ACME site: %s", raw)
+	}
+	if !strings.Contains(raw, "http://app.example.com") {
+		t.Fatalf("missing HTTP site for HTTP-01: %s", raw)
+	}
+	if !strings.Contains(raw, "host.docker.internal:49152") {
+		t.Fatalf("missing custom-domain upstream: %s", raw)
+	}
+}
+
+func TestRenderCaddyfileCustomDomainSkipsPendingAndWrongEnv(t *testing.T) {
+	prodID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
+	prevID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
+	app := "bbbbbbbb-bbbb-4000-8000-000000000001"
+	other := "cccccccc-cccc-4000-8000-000000000002"
+	raw := string(RenderCaddyfile("host.docker.internal", []store.Deployment{
+		{ID: prodID, ApplicationID: app, HostPort: 49152, Environment: store.EnvProduction},
+		{ID: prevID, ApplicationID: app, HostPort: 49153, Environment: store.EnvPreview},
+	}, []store.ApplicationDomain{
+		{ApplicationID: app, Hostname: "pending.example.com", Environment: store.EnvProduction, Status: store.DomainPending},
+		{ApplicationID: app, Hostname: "preview.example.com", Environment: store.EnvPreview, Status: store.DomainActive},
+		{ApplicationID: other, Hostname: "stolen.example.com", Environment: store.EnvProduction, Status: store.DomainActive},
+		{ApplicationID: app, Hostname: "not a host", Environment: store.EnvProduction, Status: store.DomainActive},
+	}))
+	if strings.Contains(raw, "pending.example.com") {
+		t.Fatal("pending must not be routed")
+	}
+	if strings.Contains(raw, "stolen.example.com") {
+		t.Fatal("another application's domain must not attach")
+	}
+	if strings.Contains(raw, "not a host") {
+		t.Fatal("invalid hostname must not be interpolated")
+	}
+	if !strings.Contains(raw, "https://preview.example.com") {
+		t.Fatalf("missing preview domain: %s", raw)
+	}
+	httpsIdx := strings.Index(raw, "https://preview.example.com")
+	chunk := raw[httpsIdx:]
+	if !strings.Contains(chunk, "host.docker.internal:49153") {
+		t.Fatalf("preview domain must use preview upstream: %s", chunk)
+	}
+	if strings.Contains(chunk, ":49152") {
+		t.Fatal("preview domain used production port")
+	}
+}
+
+func TestPlatformHostsStayOffUntilZoneIsSet(t *testing.T) {
+	domains := []store.ApplicationDomain{
+		{Hostname: "mine.example.com", Origin: store.DomainOriginCustom, Status: store.DomainActive, ApplicationID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", Environment: store.EnvProduction},
+		{Hostname: "app.forge.com", Origin: store.DomainOriginPlatform, Status: store.DomainActive, ApplicationID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", Environment: store.EnvProduction},
+	}
+	filtered := routableDomains(domains, "")
+	raw := string(RenderCaddyfile("host.docker.internal", []store.Deployment{
+		{ID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", ApplicationID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", HostPort: 49152, Environment: store.EnvProduction},
+	}, filtered))
+	if strings.Contains(raw, "app.forge.com") {
+		t.Fatal("platform host routed without FORGE_APPS_DOMAIN")
+	}
+	if !strings.Contains(raw, "mine.example.com") {
+		t.Fatal("custom domain dropped")
+	}
+	if controlPlaneSite("", "console.forge.com", "host.docker.internal:3000") != "" {
+		t.Fatal("control plane site without a zone")
+	}
+	site := controlPlaneSite("forge.com", "console.forge.com", "host.docker.internal:3000")
+	if !strings.Contains(site, "https://console.forge.com") || !strings.Contains(site, "issuer acme") {
+		t.Fatal(site)
+	}
+}

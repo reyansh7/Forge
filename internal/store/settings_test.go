@@ -26,6 +26,23 @@ func TestValidateRootDirectory(t *testing.T) {
 	}
 }
 
+func TestValidateBuildPackage(t *testing.T) {
+	got, err := ValidateBuildPackage("  ./cmd/api  ")
+	if err != nil || got != "./cmd/api" {
+		t.Fatalf("got %q err=%v", got, err)
+	}
+	if _, err := ValidateBuildPackage("./cmd/../api"); err == nil {
+		t.Fatal("expected rejection")
+	}
+	if _, err := ValidateBuildPackage("go build ./cmd/api"); err == nil {
+		t.Fatal("expected rejection of a shell command")
+	}
+	empty, err := ValidateBuildPackage("")
+	if err != nil || empty != "" {
+		t.Fatalf("empty got %q err=%v", empty, err)
+	}
+}
+
 func TestValidateHealthPath(t *testing.T) {
 	got, err := ValidateHealthPath("/ready")
 	if err != nil || got != "/ready" {

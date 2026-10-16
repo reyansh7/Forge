@@ -21,6 +21,24 @@ Forge applies SQL from `internal/store/migrations/` at process start (`Postgres.
 
 `0008_nodes.sql` adds `nodes` and `deployments.node_id`. Restart API and worker so both migrate. Existing queued jobs on the old `forge:jobs` list are not consumed — re-enqueue after upgrade.
 
+`0009_application_links.sql` adds same-project service edges. Restart API and worker. Links apply on the **next** deploy, not to a live container.
+
+`0010_application_volumes.sql` adds persistent volume declarations. Restart API and worker. Mounts apply on the **next** deploy. Deleting a volume (or the application) best-effort `docker volume rm`s on this node; a remote worker may leave an orphan named volume.
+
+`0011_deployment_environment.sql` adds `deployments.environment` (`preview`|`production`) and unique LIVE per `(application_id, environment)`. Restart API and worker. Existing rows default to production; `{slug}.localhost` is unchanged. Preview uses `{slug}-preview.localhost`. Phase 7.5 mounts named volumes on preview under `forgevol_<app>_preview_<name>` (production names stay `forgevol_<app>_<name>` so existing data is not orphaned). No new migration for 7.5.
+
+`0012_application_domains.sql` adds public hostnames. Restart API and worker. Create a TXT record at `_forge-challenge.<hostname>` then POST verify. Caddy ACME needs :80/:443 reachable; Compose still publishes loopback. Certificates persist in the `forge_caddy_data` volume.
+
+`0013_github_oauth.sql` adds GitHub accounts, repo/branch bindings, webhook delivery dedupe, and `deployments.commit_*`. Restart API and worker. Set `FORGE_GITHUB_CLIENT_ID` / `FORGE_GITHUB_CLIENT_SECRET`. Tokens are sealed with the same data key as env vars. Do not commit those secrets.
+
+`0014_deployment_active_job.sql` adds `deployments.active_job_id`. Restart API and worker. Existing queued rows keep an empty id and still run. New deploys and **Re-queue** stamp the id before `RPUSH`.
+
+`0015_deployment_lease.sql` adds `lease_until` and `recovery_count`. Restart API and worker together. The worker renews the lease while a deploy runs. The API and the worker sweep expired leases. A worker restart expires only that node's in-flight leases; it does not mark them failed itself. See `docs/DEPLOYMENT_RECOVERY.md`.
+
+`0016_github_login.sql` allows `github_oauth_states.user_id` to be NULL. Restart the API. NULL is Sign in with GitHub. A non-NULL row is still "connect this already-signed-in operator".
+
+`0017_platform_hostnames.sql` adds `application_domains.origin` (`custom`|`platform`). Restart the API and the worker. Existing rows stay `custom`. Platform rows appear only when `FORGE_APPS_DOMAIN` is set. Set `FORGE_GITHUB_ALLOWED_USER_IDS` before relying on GitHub login; an empty list refuses it.
+
 ## Env encryption and upgrades
 
 Phase 5 seals new env values as `enc:v1:...`. Rows without that prefix still `Open` as plaintext so a restored Phase 3 dump keeps working after you set the data key. Re-saving an env var re-seals it.

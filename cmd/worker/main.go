@@ -94,38 +94,50 @@ func run(log *slog.Logger) error {
 	go heartbeatNode(ctx, log, pg, node.ID, cfg.NodeAdvertiseHost)
 
 	deployHandler := deploy.Handler{
-		Log:               log,
-		Store:             pg,
-		Fetcher:           runtime.HostFetcher{},
-		Builder:           runtime.HostDocker{},
-		Runner:            runtime.HostDocker{},
-		Router:            proxy.Caddy{AdminURL: cfg.CaddyAdminURL, UpstreamHost: cfg.CaddyUpstreamHost},
+		Log:     log,
+		Store:   pg,
+		Fetcher: runtime.HostFetcher{},
+		Builder: runtime.HostDocker{},
+		Runner:  runtime.HostDocker{},
+		Router: proxy.Caddy{
+			AdminURL:        cfg.CaddyAdminURL,
+			UpstreamHost:    cfg.CaddyUpstreamHost,
+			Domains:         pg,
+			AppsDomain:      cfg.AppsDomain,
+			ControlHost:     cfg.ControlHost,
+			ControlUpstream: cfg.DashboardUpstream,
+		},
 		WorkspaceDir:      cfg.WorkspaceDir,
 		WorkspaceMaxBytes: cfg.WorkspaceMaxBytes,
 		ProxyBase:         cfg.ProxyPublicBase,
+		NodeID:            node.ID,
+		AppsDomain:        cfg.AppsDomain,
+		ControlHost:       cfg.ControlHost,
 	}
 
-	// A killed worker leaves rows in BUILDING. Those block Deploy until
-	// someone Stops. Close them here so a restart unsticks the app.
-	if stale, err := pg.ListInterruptedDeployments(ctx, node.ID); err != nil {
-		log.Error("list in-progress deployments failed", "err", err)
-	} else {
-		docker := runtime.HostDocker{}
-		for _, d := range stale {
-			if d.ID != "" {
-				_ = docker.Stop(ctx, runtime.ResolveContainerName(d.ID, d.ContainerName))
-			}
-			stage := string(d.Status)
-			d.FailedStage = stage
-			d.Status = store.StatusFailed
-			d.ErrorMessage = store.SanitizeErrorMessage("worker restarted before this deploy finished")
-			if err := pg.UpdateDeployment(ctx, d); err != nil {
-				log.Error("abandon stale deploy failed", "id", d.ID, "err", err)
-			} else {
-				log.Info("abandoned stale deploy", "id", d.ID, "was", stage)
-			}
-		}
+	// The previous process is dead. Expire its leases so the sweeper can
+	// re-queue early stages or fail later ones. Do not mark them failed
+	// here: a blind fail skips the bounded re-queue and can race a live
+	// cutover. LIVE rows are not expired.
+	if n, err := pg.ExpireNodeLeases(ctx, node.ID); err != nil {
+		log.Error("expire node leases failed", "err", err)
+	} else if n > 0 {
+		log.Info("expired leases from previous worker process", "rows", n, "node_id", node.ID)
 	}
+	go deploy.RunSweep(ctx, deploy.Sweeper{
+		Log:   log,
+		Store: pg,
+		Stop: func(ctx context.Context, name string) error {
+			return runtime.HostDocker{}.Stop(ctx, name)
+		},
+		Push: func(ctx context.Context, d store.Deployment, job queue.Job) error {
+			target := d.NodeID
+			if target == "" {
+				target = node.ID
+			}
+			return q.EnqueueOn(ctx, target, job)
+		},
+	}, 20*time.Second)
 
 	// Caddy's in-memory config dies on container restart. Re-apply LIVE
 	// routes so a worker start restores the proxy without a new deploy.
@@ -135,11 +147,11 @@ func run(log *slog.Logger) error {
 		log.Error("caddy reconcile failed", "err", err)
 	}
 
-	log.Info("worker consuming", "node", node.Name, "node_id", node.ID, "queue_key", key)
-	return worker.Run(ctx, q, worker.Dispatcher{
+	log.Info("worker consuming", "node", node.Name, "node_id", node.ID, "queue_key", key, "concurrency", cfg.MaxInflightPerNode)
+	return worker.RunConcurrent(ctx, q, worker.Dispatcher{
 		Example: worker.ExampleHandler{Log: log},
 		Deploy:  deployHandler,
-	}, log)
+	}, cfg.MaxInflightPerNode, log)
 }
 
 // heartbeatNode keeps last_seen_at fresh so the scheduler does not

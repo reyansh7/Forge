@@ -47,6 +47,7 @@ func (m *memApps) CreateApplication(_ context.Context, projectID string, in stor
 		RootDirectory: in.RootDirectory,
 		HealthPath:    in.HealthPath,
 		LocalHost:     in.LocalHost,
+		BuildPackage:  in.BuildPackage,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
@@ -96,6 +97,7 @@ func (m *memApps) UpdateApplication(_ context.Context, id string, in store.Appli
 	a.RootDirectory = in.RootDirectory
 	a.HealthPath = in.HealthPath
 	a.LocalHost = in.LocalHost
+	a.BuildPackage = in.BuildPackage
 	if a.RootDirectory == "" {
 		a.RootDirectory = "."
 	}
@@ -418,7 +420,7 @@ func TestCreateDeploymentConflictWhenMultipleApps(t *testing.T) {
 	}
 }
 
-func TestCreateDeploymentRejectedWhenLive(t *testing.T) {
+func TestCreateDeploymentWhileLiveAccepted(t *testing.T) {
 	mem := newMemProjects()
 	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
 		Name:          "demo",
@@ -450,8 +452,15 @@ func TestCreateDeploymentRejectedWhenLive(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/deployments", bytes.NewReader([]byte(`{}`)))
 	testHandler(srv).ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := deps.GetDeployment(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusLive {
+		t.Fatalf("previous live must stay %q, got %q", store.StatusLive, got.Status)
 	}
 }
 
@@ -587,5 +596,191 @@ func TestApplicationHealthUsesContainerStateNotHTTP(t *testing.T) {
 	}
 	if unhealthy["status"] != "unhealthy" {
 		t.Fatalf("status = %v", unhealthy["status"])
+	}
+}
+
+func TestPreviewDeployWhileProductionLive(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          "app",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	prod, err := deps.CreateDeploymentIn(context.Background(), app.ID, store.EnvProduction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod.Status = store.StatusLive
+	prod.HostPort = 49152
+	_ = deps.UpdateDeployment(context.Background(), prod)
+
+	srv := appServer(mem, apps, deps)
+	srv.Runtime = &stubRuntime{running: true}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/deployments", bytes.NewReader([]byte(`{"environment":"preview"}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["environment"] != store.EnvPreview {
+		t.Fatalf("environment = %v", body["environment"])
+	}
+}
+
+func TestStopPreviewLeavesProduction(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          "app",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	prod, err := deps.CreateDeploymentIn(context.Background(), app.ID, store.EnvProduction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod.Status = store.StatusLive
+	_ = deps.UpdateDeployment(context.Background(), prod)
+	prev, err := deps.CreateDeploymentIn(context.Background(), app.ID, store.EnvPreview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev.Status = store.StatusLive
+	_ = deps.UpdateDeployment(context.Background(), prev)
+
+	srv := appServer(mem, apps, deps)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/stop", bytes.NewReader([]byte(`{"environment":"preview"}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	gotProd, err := deps.GetDeployment(context.Background(), prod.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProd.Status != store.StatusLive {
+		t.Fatalf("production = %q", gotProd.Status)
+	}
+	gotPrev, err := deps.GetDeployment(context.Background(), prev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPrev.Status != store.StatusStopped {
+		t.Fatalf("preview = %q", gotPrev.Status)
+	}
+}
+
+func TestRestartApplicationQueuesSameEnvironment(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          "app",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	live, err := deps.CreateDeploymentIn(context.Background(), app.ID, store.EnvPreview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Status = store.StatusLive
+	_ = deps.UpdateDeployment(context.Background(), live)
+
+	srv := appServer(mem, apps, deps)
+	srv.Runtime = &stubRuntime{running: true}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/restart", bytes.NewReader([]byte(`{"environment":"preview"}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := deps.GetDeployment(context.Background(), live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusLive {
+		t.Fatalf("rolling restart must keep previous live until cutover, got %q", got.Status)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["environment"] != store.EnvPreview {
+		t.Fatalf("queued environment = %v", body["environment"])
+	}
+}
+
+func TestLogsDefaultToProductionEnvironment(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          "app",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	prev, err := deps.CreateDeploymentIn(context.Background(), app.ID, store.EnvPreview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev.Status = store.StatusLive
+	_ = deps.UpdateDeployment(context.Background(), prev)
+
+	srv := appServer(mem, apps, deps)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/applications/"+app.ID+"/logs", nil)
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("production logs should 404 when only preview is live: %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/applications/"+app.ID+"/logs?environment=preview", nil)
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview logs = %d body=%s", rec.Code, rec.Body.String())
 	}
 }

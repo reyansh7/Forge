@@ -14,6 +14,7 @@ export type Application = {
   root_directory: string;
   health_path: string;
   local_host: string;
+  platform_url?: string;
   created_at: string;
   updated_at: string;
 };
@@ -37,7 +38,11 @@ export type Deployment = {
   build_log?: string;
   rollback_of?: string;
   local_host?: string;
+  environment?: string;
   node_id?: string;
+  commit_sha?: string;
+  commit_message?: string;
+  commit_author?: string;
   duration_ms?: number;
   created_at: string;
   updated_at: string;
@@ -51,6 +56,7 @@ export type EnvVar = {
 export type AppLogs = {
   application_id: string;
   deployment_id: string;
+  environment?: string;
   tail: number;
   text: string;
 };
@@ -58,6 +64,7 @@ export type AppLogs = {
 export type AppHealth = {
   application_id: string;
   deployment_id?: string;
+  environment?: string;
   status: string;
   public_url?: string;
 };
@@ -199,6 +206,74 @@ export function createProject(name: string, repository_url: string): Promise<Pro
   }).then((r) => parse<Project>(r));
 }
 
+export type PlanService = {
+  name: string;
+  root: string;
+  package?: string;
+  kind?: string;
+  framework?: string;
+  runtime?: string;
+  port?: number;
+  deployable: boolean;
+  detail: string;
+};
+
+export function projectPlan(id: string): Promise<PlanService[]> {
+  return apiFetch(`/forge-api/projects/${id}/plan`).then((r) => parse<PlanService[]>(r));
+}
+
+export type ProjectDeployService = {
+  name: string;
+  application_id: string;
+  deployment_id?: string;
+  root: string;
+  package?: string;
+  port?: number;
+  status: string;
+  error?: string;
+  internal_url?: string;
+};
+
+export type ProjectDeployLink = {
+  source: string;
+  target: string;
+  env_key: string;
+};
+
+export type ProjectDeploy = {
+  id: string;
+  project_id: string;
+  status: string;
+  error_message?: string;
+  note?: string;
+  attention?: string;
+  services: ProjectDeployService[];
+  links: ProjectDeployLink[];
+  created_at: string;
+};
+
+export function deployProject(id: string, services?: string[]): Promise<ProjectDeploy> {
+  return apiFetch(`/forge-api/projects/${id}/deploy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(services && services.length > 0 ? { services } : {}),
+  }).then((r) => parse<ProjectDeploy>(r));
+}
+
+export function listProjectDeploys(id: string): Promise<ProjectDeploy[]> {
+  return apiFetch(`/forge-api/projects/${id}/deploys`).then((r) => parse<ProjectDeploy[]>(r));
+}
+
+export function getProjectDeploy(projectId: string, deployId: string): Promise<ProjectDeploy> {
+  return apiFetch(`/forge-api/projects/${projectId}/deploys/${deployId}`).then((r) => parse<ProjectDeploy>(r));
+}
+
+export function cancelProjectDeploy(projectId: string, deployId: string): Promise<ProjectDeploy> {
+  return apiFetch(`/forge-api/projects/${projectId}/deploys/${deployId}/cancel`, { method: "POST" }).then((r) =>
+    parse<ProjectDeploy>(r),
+  );
+}
+
 export function getProject(id: string): Promise<Project> {
   return apiFetch(`/forge-api/projects/${id}`).then((r) => parse<Project>(r));
 }
@@ -266,16 +341,48 @@ export function createDeployment(projectId: string): Promise<Deployment> {
   }).then((r) => parse<Deployment>(r));
 }
 
-export function createApplicationDeployment(applicationId: string): Promise<Deployment> {
+export type DeployEnvironment = "production" | "preview";
+
+function withEnvironment(path: string, environment: DeployEnvironment = "production"): string {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}environment=${encodeURIComponent(environment)}`;
+}
+
+export function createApplicationDeployment(
+  applicationId: string,
+  environment: DeployEnvironment = "production",
+): Promise<Deployment> {
   return apiFetch(`/forge-api/applications/${applicationId}/deployments`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ environment }),
   }).then((r) => parse<Deployment>(r));
 }
 
 export function getDeployment(id: string): Promise<Deployment> {
   return apiFetch(`/forge-api/deployments/${id}`).then((r) => parse<Deployment>(r));
+}
+
+export type EnvTemplate = {
+  path: string;
+  directory: string;
+  vars: { key: string; value: string }[];
+};
+
+export function listEnvTemplates(applicationId: string): Promise<EnvTemplate[]> {
+  return apiFetch(`/forge-api/applications/${applicationId}/env-templates`).then((r) => parse<EnvTemplate[]>(r));
+}
+
+export function applyEnvTemplate(
+  applicationId: string,
+  directory: string,
+  vars: EnvVar[],
+): Promise<{ application_id: string; name: string; root_directory: string }> {
+  return apiFetch(`/forge-api/applications/${applicationId}/env-templates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ directory, vars }),
+  }).then((r) => parse<{ application_id: string; name: string; root_directory: string }>(r));
 }
 
 export function listEnv(applicationId: string): Promise<EnvVar[]> {
@@ -306,6 +413,14 @@ export function replaceEnv(applicationId: string, vars: EnvVar[]): Promise<EnvVa
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ vars }),
   }).then((r) => parse<EnvVar[]>(r));
+}
+
+export function retryDeployment(id: string): Promise<Deployment> {
+  return apiFetch(`/forge-api/deployments/${id}/retry`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }).then((r) => parse<Deployment>(r));
 }
 
 export function rollbackDeployment(sourceId: string): Promise<Deployment> {
@@ -344,6 +459,174 @@ export type WorkerNode = {
   updated_at: string;
 };
 
+export type ServiceLink = {
+  id: string;
+  source_application_id: string;
+  target_application_id: string;
+  target_name?: string;
+  env_key: string;
+  url?: string;
+  created_at: string;
+};
+
+export function listLinks(applicationId: string): Promise<ServiceLink[]> {
+  return apiFetch(`/forge-api/applications/${applicationId}/links`).then((r) => parse<ServiceLink[]>(r));
+}
+
+export function createLink(
+  applicationId: string,
+  targetApplicationId: string,
+  envKey: string,
+): Promise<ServiceLink> {
+  return apiFetch(`/forge-api/applications/${applicationId}/links`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_application_id: targetApplicationId, env_key: envKey }),
+  }).then((r) => parse<ServiceLink>(r));
+}
+
+export type AppVolume = {
+  id: string;
+  application_id: string;
+  name: string;
+  mount_path: string;
+  docker_name: string;
+  preview_docker_name?: string;
+};
+
+export function listVolumes(applicationId: string): Promise<AppVolume[]> {
+  return apiFetch(`/forge-api/applications/${applicationId}/volumes`).then((r) => parse<AppVolume[]>(r));
+}
+
+export function createVolume(applicationId: string, name: string, mountPath: string): Promise<AppVolume> {
+  return apiFetch(`/forge-api/applications/${applicationId}/volumes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, mount_path: mountPath }),
+  }).then((r) => parse<AppVolume>(r));
+}
+
+export function deleteVolume(applicationId: string, volumeId: string): Promise<void> {
+  return apiFetch(`/forge-api/applications/${applicationId}/volumes/${volumeId}`, { method: "DELETE" }).then(
+    (r) => {
+      if (!r.ok && r.status !== 204) {
+        return parse<void>(r);
+      }
+    },
+  );
+}
+
+export type AppDomain = {
+  id: string;
+  application_id: string;
+  hostname: string;
+  environment: string;
+  status: string;
+  origin?: string;
+  txt_name: string;
+  txt_value: string;
+};
+
+export function listDomains(applicationId: string): Promise<AppDomain[]> {
+  return apiFetch(`/forge-api/applications/${applicationId}/domains`).then((r) => parse<AppDomain[]>(r));
+}
+
+export function createDomain(applicationId: string, hostname: string, environment: string): Promise<AppDomain> {
+  return apiFetch(`/forge-api/applications/${applicationId}/domains`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostname, environment }),
+  }).then((r) => parse<AppDomain>(r));
+}
+
+export function verifyDomain(applicationId: string, domainId: string): Promise<AppDomain> {
+  return apiFetch(`/forge-api/applications/${applicationId}/domains/${domainId}/verify`, { method: "POST" }).then(
+    (r) => parse<AppDomain>(r),
+  );
+}
+
+export type GitHubStatus = {
+  configured: boolean;
+  connected: boolean;
+  login?: string;
+};
+
+export type GitHubRepo = {
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+};
+
+export type ApplicationGitHub = {
+  connected: boolean;
+  repo?: string;
+  branch?: string;
+  environment?: string;
+  webhook?: boolean;
+  warning?: string;
+};
+
+export function getGitHubStatus(): Promise<GitHubStatus> {
+  return apiFetch("/forge-api/integrations/github/status").then((r) => parse<GitHubStatus>(r));
+}
+
+export function listGitHubRepos(): Promise<GitHubRepo[]> {
+  return apiFetch("/forge-api/integrations/github/repos").then((r) => parse<GitHubRepo[]>(r));
+}
+
+export function getApplicationGitHub(applicationId: string): Promise<ApplicationGitHub> {
+  return apiFetch(`/forge-api/applications/${applicationId}/github`).then((r) => parse<ApplicationGitHub>(r));
+}
+
+export function connectApplicationGitHub(
+  applicationId: string,
+  repo: string,
+  branch: string,
+  environment: string,
+): Promise<ApplicationGitHub> {
+  return apiFetch(`/forge-api/applications/${applicationId}/github`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo, branch, environment }),
+  }).then((r) => parse<ApplicationGitHub>(r));
+}
+
+export function disconnectApplicationGitHub(applicationId: string): Promise<void> {
+  return apiFetch(`/forge-api/applications/${applicationId}/github`, { method: "DELETE" }).then((r) => {
+    if (!r.ok && r.status !== 204) {
+      return parse<void>(r);
+    }
+  });
+}
+
+export function disconnectGitHub(): Promise<void> {
+  return apiFetch("/forge-api/integrations/github/disconnect", { method: "POST" }).then((r) => {
+    if (!r.ok && r.status !== 204) {
+      return parse<void>(r);
+    }
+  });
+}
+
+export function deleteDomain(applicationId: string, domainId: string): Promise<void> {
+  return apiFetch(`/forge-api/applications/${applicationId}/domains/${domainId}`, { method: "DELETE" }).then(
+    (r) => {
+      if (!r.ok && r.status !== 204) {
+        return parse<void>(r);
+      }
+    },
+  );
+}
+
+export function deleteLink(applicationId: string, linkId: string): Promise<void> {
+  return apiFetch(`/forge-api/applications/${applicationId}/links/${linkId}`, { method: "DELETE" }).then(
+    (r) => {
+      if (!r.ok && r.status !== 204) {
+        return parse<void>(r);
+      }
+    },
+  );
+}
+
 export function getMetrics(): Promise<ObserveMetrics> {
   return apiFetch("/forge-api/metrics").then((r) => parse<ObserveMetrics>(r));
 }
@@ -360,20 +643,45 @@ export function createNode(name: string, advertiseHost = ""): Promise<WorkerNode
   }).then((r) => parse<WorkerNode>(r));
 }
 
-export function getApplicationLogs(applicationId: string, tail = 100): Promise<AppLogs> {
-  return apiFetch(`/forge-api/applications/${applicationId}/logs?tail=${tail}`).then((r) =>
-    parse<AppLogs>(r),
+export function getApplicationLogs(
+  applicationId: string,
+  tail = 100,
+  environment: DeployEnvironment = "production",
+): Promise<AppLogs> {
+  return apiFetch(
+    withEnvironment(`/forge-api/applications/${applicationId}/logs?tail=${tail}`, environment),
+  ).then((r) => parse<AppLogs>(r));
+}
+
+export function getApplicationHealth(
+  applicationId: string,
+  environment: DeployEnvironment = "production",
+): Promise<AppHealth> {
+  return apiFetch(withEnvironment(`/forge-api/applications/${applicationId}/health`, environment)).then(
+    (r) => parse<AppHealth>(r),
   );
 }
 
-export function getApplicationHealth(applicationId: string): Promise<AppHealth> {
-  return apiFetch(`/forge-api/applications/${applicationId}/health`).then((r) => parse<AppHealth>(r));
+export function stopApplication(
+  applicationId: string,
+  environment: DeployEnvironment = "production",
+): Promise<Deployment> {
+  return apiFetch(`/forge-api/applications/${applicationId}/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ environment }),
+  }).then((r) => parse<Deployment>(r));
 }
 
-export function stopApplication(applicationId: string): Promise<Deployment> {
-  return apiFetch(`/forge-api/applications/${applicationId}/stop`, { method: "POST" }).then((r) =>
-    parse<Deployment>(r),
-  );
+export function restartApplication(
+  applicationId: string,
+  environment: DeployEnvironment = "production",
+): Promise<Deployment> {
+  return apiFetch(`/forge-api/applications/${applicationId}/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ environment }),
+  }).then((r) => parse<Deployment>(r));
 }
 
 export type Health = {

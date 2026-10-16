@@ -72,7 +72,7 @@ func TestAcceptanceGitHubTrees(t *testing.T) {
 		}
 		name := "accept-express-starter"
 		_ = d.Stop(ctx, name)
-		inst, err := d.Run(ctx, image, name, nil, spec.ListenPort())
+		inst, err := d.Run(ctx, image, name, nil, spec.ListenPort(), nil)
 		if err != nil {
 			t.Fatalf("run: %v", err)
 		}
@@ -121,7 +121,7 @@ func runDetected(t *testing.T, dir string, spec detect.Result, slug string) {
 	}
 	name := "accept-" + slug
 	_ = d.Stop(ctx, name)
-	inst, err := d.Run(ctx, image, name, nil, spec.ListenPort())
+	inst, err := d.Run(ctx, image, name, nil, spec.ListenPort(), nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

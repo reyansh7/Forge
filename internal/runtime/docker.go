@@ -46,12 +46,13 @@ type Builder interface {
 }
 
 // Runner starts and stops isolated containers. Implementations must not
-// mount the host Docker socket into the workload.
+// mount the host Docker socket into the workload. vols may be empty;
+// when set they must be Forge-named Docker volumes, never host binds.
 type Runner interface {
 	// containerPort is the listen port inside the image (EXPOSE / pack
 	// default). 0 means detect.DefaultPort. The host publish port is
 	// allocated separately and stored on the deployment.
-	Run(ctx context.Context, image, containerName string, env []EnvPair, containerPort int) (Instance, error)
+	Run(ctx context.Context, image, containerName string, env []EnvPair, containerPort int, vols []VolumeMount) (Instance, error)
 	Stop(ctx context.Context, containerName string) error
 	Logs(ctx context.Context, containerName string, tail int) (string, error)
 	// Inspect is required so the worker can fail a dead container
@@ -125,7 +126,7 @@ func (HostDocker) Build(ctx context.Context, dir, image, kind string, env []EnvP
 	return log, nil
 }
 
-func (HostDocker) Run(ctx context.Context, image, containerName string, env []EnvPair, containerPort int) (Instance, error) {
+func (HostDocker) Run(ctx context.Context, image, containerName string, env []EnvPair, containerPort int, vols []VolumeMount) (Instance, error) {
 	if err := validateImageName(image); err != nil {
 		return Instance{}, err
 	}
@@ -141,14 +142,18 @@ func (HostDocker) Run(ctx context.Context, image, containerName string, env []En
 		return Instance{}, err
 	}
 
-	// Isolation (Phase 0 limits + Phase 3 hardening):
+	// Isolation (Phase 0 limits + Phase 3 + Phase 7.2/7.5 volumes):
 	// - publish on 127.0.0.1 only (not 0.0.0.0)
 	// - memory / cpu / pids caps
 	// - cap-drop ALL, tmpfs /tmp, pull=never
-	// - no --privileged, no volume mounts, no Docker socket
+	// - no --privileged, no host bind mounts, no Docker socket
+	// - named volumes only (forgevol_*), created below, persist after Stop
 	// - user env first, then PORT=<detected> so Forge wins if a key collides
+	if err := ensureNamedVolumes(ctx, vols); err != nil {
+		return Instance{}, err
+	}
 	publish := "127.0.0.1:" + strconv.Itoa(port) + ":" + strconv.Itoa(containerPort)
-	args, err := dockerRunArgs(image, containerName, publish, env, containerPort)
+	args, err := dockerRunArgs(image, containerName, publish, env, containerPort, vols, "", "")
 	if err != nil {
 		return Instance{}, err
 	}
@@ -174,9 +179,109 @@ func (HostDocker) Run(ctx context.Context, image, containerName string, env []En
 //     it, or rollback reused it). A typo must not pull from a registry.
 //
 // Still forbidden: --privileged, Docker socket mounts, host network,
-// publishing on 0.0.0.0. Read-only rootfs is not set — many images
-// write under /app (pyc, npm) and would fail closed incorrectly.
-func dockerRunArgs(image, containerName, publish string, env []EnvPair, containerPort int) ([]string, error) {
+// host bind mounts (`-v /host:/dest`), publishing on 0.0.0.0.
+// Named volumes (`-v forgevol_…:/data`) are Phase 7.2/7.5: Docker owns
+// the bytes; Stop/rm does not delete them. Preview uses a distinct
+// name so it cannot share production files. Two containers of the
+// same environment may mount the same volume during a rolling health
+// window — that is reuse, not a copy, and not a delete. Read-only
+// rootfs is not set — many images write under /app (pyc, npm) and
+// would fail closed incorrectly.
+// EnsureNetwork creates the project bridge if it does not exist.
+//
+// The name must be a Forge project network (forgep- plus 12 hex
+// characters). "host" and any user-supplied string are rejected.
+// Create is idempotent: two builds of the same project may race.
+func (HostDocker) EnsureNetwork(ctx context.Context, name string) error {
+	if err := validateProjectNetwork(name); err != nil {
+		return err
+	}
+	inspect := exec.CommandContext(ctx, "docker", "network", "inspect", "--", name)
+	if out, err := inspect.CombinedOutput(); err == nil {
+		return nil
+	} else if !strings.Contains(strings.ToLower(string(out)), "not found") && !strings.Contains(strings.ToLower(string(out)), "no such") {
+		// inspect failed for a reason other than absence. Try create anyway
+		// only when Docker says the network is missing.
+	}
+	cmd := exec.CommandContext(ctx, "docker", "network", "create", "--driver", "bridge", "--", name)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(string(out))
+	if strings.Contains(msg, "already exists") {
+		return nil
+	}
+	return fmt.Errorf("docker network create: %s", truncate(string(out), 300))
+}
+
+// RunJoined starts a workload on a project bridge and still publishes
+// only on 127.0.0.1 so the worker can health-check it. The alias is
+// the name other containers on that bridge resolve. There is no host
+// network and no extra published interface.
+func (h HostDocker) RunJoined(ctx context.Context, image, containerName string, env []EnvPair, containerPort int, vols []VolumeMount, network, alias string) (Instance, error) {
+	if err := validateImageName(image); err != nil {
+		return Instance{}, err
+	}
+	if err := validateContainerName(containerName); err != nil {
+		return Instance{}, err
+	}
+	if err := validateProjectNetwork(network); err != nil {
+		return Instance{}, err
+	}
+	if err := validateNetworkAlias(alias); err != nil {
+		return Instance{}, err
+	}
+	if containerPort < 1 || containerPort > 65535 {
+		containerPort = detect.DefaultPort
+	}
+	port, err := freeLoopbackPort()
+	if err != nil {
+		return Instance{}, err
+	}
+	if err := ensureNamedVolumes(ctx, vols); err != nil {
+		return Instance{}, err
+	}
+	publish := "127.0.0.1:" + strconv.Itoa(port) + ":" + strconv.Itoa(containerPort)
+	args, err := dockerRunArgs(image, containerName, publish, env, containerPort, vols, network, alias)
+	if err != nil {
+		return Instance{}, err
+	}
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return Instance{}, fmt.Errorf("docker run: %s", truncate(string(out), 400))
+	}
+	id := strings.TrimSpace(string(out))
+	if len(id) > 64 {
+		id = id[:64]
+	}
+	return Instance{ContainerID: id, HostPort: port}, nil
+}
+
+func validateProjectNetwork(name string) error {
+	if !projectNetworkPattern.MatchString(name) {
+		return fmt.Errorf("invalid project network")
+	}
+	return nil
+}
+
+func validateNetworkAlias(alias string) error {
+	if !networkAliasPattern.MatchString(alias) {
+		return fmt.Errorf("invalid network alias")
+	}
+	if alias == "host" || alias == "bridge" || alias == "none" {
+		return fmt.Errorf("invalid network alias")
+	}
+	return nil
+}
+
+var (
+	projectNetworkPattern = regexp.MustCompile(`^forgep-[0-9a-f]{12}$`)
+	networkAliasPattern   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+)
+
+func dockerRunArgs(image, containerName, publish string, env []EnvPair, containerPort int, vols []VolumeMount, network, alias string) ([]string, error) {
 	args := []string{
 		"run", "-d",
 		"--name", containerName,
@@ -188,6 +293,14 @@ func dockerRunArgs(image, containerName, publish string, env []EnvPair, containe
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
 		"--pull", "never",
 	}
+	for _, v := range vols {
+		if err := validateVolumeMount(v); err != nil {
+			return nil, err
+		}
+		// name:path — name has no slash, so Docker treats it as a
+		// named volume, not a bind mount.
+		args = append(args, "-v", v.Name+":"+v.Path)
+	}
 	for _, ev := range env {
 		if err := validateEnvPair(ev); err != nil {
 			return nil, err
@@ -197,8 +310,67 @@ func dockerRunArgs(image, containerName, publish string, env []EnvPair, containe
 	if containerPort < 1 || containerPort > 65535 {
 		containerPort = detect.DefaultPort
 	}
+	if network != "" {
+		if err := validateProjectNetwork(network); err != nil {
+			return nil, err
+		}
+		if err := validateNetworkAlias(alias); err != nil {
+			return nil, err
+		}
+		// A user-defined bridge, never --network host. The alias is
+		// how siblings resolve this container. The publish is still
+		// loopback-only, below.
+		args = append(args, "--network", network, "--network-alias", alias)
+	}
 	args = append(args, "-e", "HOST=0.0.0.0", "-e", "PORT="+strconv.Itoa(containerPort), "-p", publish, "--", image)
 	return args, nil
+}
+
+// ensureNamedVolumes runs `docker volume create` for each mount.
+//
+// create is idempotent: a second deploy (including rolling, while the
+// previous container still holds the volume) reuses the same name so
+// SQLite/uploads survive. Missing volumes would make `docker run -v`
+// create them implicitly; we create first so a permission error is a
+// provision failure, not a mystery start. Never `docker volume rm`.
+func ensureNamedVolumes(ctx context.Context, vols []VolumeMount) error {
+	for _, v := range vols {
+		if err := validateVolumeMount(v); err != nil {
+			return err
+		}
+		cmd := exec.CommandContext(ctx, "docker", "volume", "create", "--", v.Name)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("docker volume create: %s", truncate(string(out), 300))
+		}
+	}
+	return nil
+}
+
+// RemoveVolume deletes a Forge-owned named volume.
+//
+// Called by the API after the operator deletes the volume declaration
+// (or the application) — never by the deploy pipeline. A missing
+// volume is success. In-use is an error so a live or rolling
+// container cannot lose its mount under it. Host paths are rejected
+// by the name check.
+func (HostDocker) RemoveVolume(ctx context.Context, name string) error {
+	if !dockerVolumeNamePattern.MatchString(strings.TrimSpace(name)) {
+		return fmt.Errorf("invalid volume name")
+	}
+	cmd := exec.CommandContext(ctx, "docker", "volume", "rm", "--", name)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(string(out))
+	if strings.Contains(msg, "no such volume") || strings.Contains(msg, "not found") {
+		return nil
+	}
+	if strings.Contains(msg, "in use") || strings.Contains(msg, "being used") {
+		return fmt.Errorf("volume is in use")
+	}
+	return fmt.Errorf("docker volume rm: %s", truncate(string(out), 300))
 }
 
 func (HostDocker) Stop(ctx context.Context, containerName string) error {
@@ -208,6 +380,9 @@ func (HostDocker) Stop(ctx context.Context, containerName string) error {
 	// Best-effort: a missing container is not a pipeline failure.
 	// -t 2: default docker stop waits 10s for SIGTERM. That outlived
 	// the HTTP timeout and skipped persisting STOPPED (LIVE + dead).
+	// `docker rm` without `-v`: named volumes must survive rolling
+	// cutover, restart, rollback, and failed deploys. Only operator
+	// volume delete (RemoveVolume) may destroy data.
 	stop := exec.CommandContext(ctx, "docker", "stop", "-t", "2", "--", containerName)
 	_ = stop.Run()
 	rm := exec.CommandContext(ctx, "docker", "rm", "-f", "--", containerName)

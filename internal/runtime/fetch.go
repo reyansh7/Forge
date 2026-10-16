@@ -66,10 +66,9 @@ func (HostFetcher) Fetch(ctx context.Context, repositoryURL, dest string) error 
 	// protocol.file.allow=never: git must not be tricked into reading
 	// the host filesystem. --depth 1: we do not need history.
 	// CommandContext + argv (no shell): the URL cannot become `url; rm`.
-	cmd := exec.CommandContext(ctx, "git",
-		"-c", "protocol.file.allow=never",
+	cmd := exec.CommandContext(ctx, "git", append(gitCommandConfig(),
 		"clone", "--depth", "1", "--", repositoryURL, dest,
-	)
+	)...)
 	cmd.Env = gitSafeEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -142,14 +141,42 @@ func rejectBlockedHost(ctx context.Context, host string) error {
 	return nil
 }
 
+// gitCommandConfig stops the operator's Git setup from rewriting the
+// clone. credential.username in ~/.gitconfig turns
+// https://github.com/... into https://reyansh7@github.com and Git then
+// asks for a password. An empty -c value overrides that file.
+// credential.helper= drops Windows Credential Manager for this command.
+func gitCommandConfig() []string {
+	return []string{
+		"-c", "protocol.file.allow=never",
+		"-c", "credential.helper=",
+		"-c", "credential.username=",
+	}
+}
+
 func gitSafeEnv() []string {
 	// Drop GIT_* hooks from the operator environment so a repo cannot
 	// run host-side hook scripts during clone.
-	out := []string{"GIT_TERMINAL_PROMPT=0"}
+	//
+	// Also ignore the operator's gitconfig. On Windows that file often
+	// rewrites https://github.com into https://<user>@github.com and
+	// then asks for a password. Forge authenticates with the OAuth
+	// token instead, and GIT_TERMINAL_PROMPT=0 would turn that prompt
+	// into "could not read Password".
+	cfg := filepath.Join(os.TempDir(), "forge-empty-gitconfig")
+	if f, err := os.OpenFile(cfg, os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		_ = f.Close()
+	}
+	out := []string{
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=" + cfg,
+		"GCM_INTERACTIVE=never",
+	}
 	for _, kv := range os.Environ() {
 		key, _, _ := strings.Cut(kv, "=")
 		upper := strings.ToUpper(key)
-		if strings.HasPrefix(upper, "GIT_") {
+		if strings.HasPrefix(upper, "GIT_") || strings.EqualFold(key, "GCM_INTERACTIVE") {
 			continue
 		}
 		out = append(out, kv)

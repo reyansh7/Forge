@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/reyansh7/Forge/internal/config"
+	"github.com/reyansh7/Forge/internal/deploy"
+	"github.com/reyansh7/Forge/internal/githubapi"
 	"github.com/reyansh7/Forge/internal/httpapi"
 	"github.com/reyansh7/Forge/internal/proxy"
 	"github.com/reyansh7/Forge/internal/queue"
@@ -104,18 +106,39 @@ func run(log *slog.Logger) error {
 	}
 
 	api := &httpapi.Server{
-		Log:           log,
-		Postgres:      pg,
-		Redis:         rdb,
-		Projects:      pg,
-		Apps:          pg,
-		Deployments:   pg,
-		Jobs:          jobs,
-		Nodes:         pg,
-		Placer:        &schedule.Scheduler{Nodes: pg, MaxInflight: cfg.MaxInflightPerNode},
-		Sink:          jobs,
-		Runtime:       runtime.HostDocker{},
-		Router:        proxy.Caddy{AdminURL: cfg.CaddyAdminURL, UpstreamHost: cfg.CaddyUpstreamHost},
+		Log:                  log,
+		Postgres:             pg,
+		Redis:                rdb,
+		Projects:             pg,
+		Apps:                 pg,
+		Deployments:          pg,
+		Jobs:                 jobs,
+		Nodes:                pg,
+		Placer:               &schedule.Scheduler{Nodes: pg, MaxInflight: cfg.MaxInflightPerNode},
+		Sink:                 jobs,
+		Links:                pg,
+		ProjectDeploys:       pg,
+		Volumes:              pg,
+		Domains:              pg,
+		GitHubAccounts:       pg,
+		GitHub:               &githubapi.Client{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret},
+		GitHubClientID:       cfg.GitHubClientID,
+		GitHubClientSecret:   cfg.GitHubClientSecret,
+		GitHubAllowedUserIDs: cfg.GitHubAllowedUserIDs,
+		PublicBase:           cfg.PublicBase,
+		WebhookBase:          cfg.WebhookBase,
+		AppsDomain:           cfg.AppsDomain,
+		ControlHost:          cfg.ControlHost,
+		ProxyPublicBase:      cfg.ProxyPublicBase,
+		Runtime:              runtime.HostDocker{},
+		Router: proxy.Caddy{
+			AdminURL:        cfg.CaddyAdminURL,
+			UpstreamHost:    cfg.CaddyUpstreamHost,
+			Domains:         pg,
+			AppsDomain:      cfg.AppsDomain,
+			ControlHost:     cfg.ControlHost,
+			ControlUpstream: cfg.DashboardUpstream,
+		},
 		Auth:          pg,
 		Schemas:       pg,
 		SecureCookies: cfg.TLSEnabled(),
@@ -125,6 +148,27 @@ func run(log *slog.Logger) error {
 			MaxInflightPerNode:  cfg.MaxInflightPerNode,
 		},
 	}
+
+	sched := &schedule.Scheduler{Nodes: pg, MaxInflight: cfg.MaxInflightPerNode}
+	go deploy.RunSweep(ctx, deploy.Sweeper{
+		Log:   log,
+		Store: pg,
+		Stop: func(ctx context.Context, name string) error {
+			return runtime.HostDocker{}.Stop(ctx, name)
+		},
+		// PlacePrefer keeps a volume on its node when that node is
+		// ready. A dead node falls through to another ready worker.
+		Push: func(ctx context.Context, d store.Deployment, job queue.Job) error {
+			node, err := sched.PlacePrefer(ctx, d.NodeID)
+			if err != nil {
+				return err
+			}
+			if err := pg.SetDeploymentNode(ctx, d.ID, node.ID); err != nil {
+				return err
+			}
+			return jobs.EnqueueOn(ctx, node.ID, job)
+		},
+	}, 20*time.Second)
 
 	srv := &http.Server{
 		Addr:    cfg.Addr,

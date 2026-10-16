@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/reyansh7/Forge/internal/queue"
@@ -96,5 +97,95 @@ func Run(ctx context.Context, q queue.JobQueue, h Handler, log *slog.Logger) err
 			log.Error("job handler failed", "id", job.ID, "type", job.Type, "err", err)
 			continue
 		}
+	}
+}
+
+// RunConcurrent dequeues up to limit jobs at once.
+//
+// Redis BLPOP delivers each job to one waiter, so two goroutines do
+// not run the same payload. A handler that returns queue.ErrDefer
+// still has to Enqueue the job again: it is already off the list.
+// limit is the node cap (FORGE_MAX_INFLIGHT_PER_NODE). Values below 1
+// run one job at a time.
+func RunConcurrent(ctx context.Context, q queue.JobQueue, h Handler, limit int, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	if h == nil {
+		h = ExampleHandler{Log: log}
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	log.Info("worker started", "concurrency", limit)
+	defer log.Info("worker stopped")
+
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for {
+		if err := ctx.Err(); err != nil {
+			wg.Wait()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return nil
+		case sem <- struct{}{}:
+		}
+
+		job, err := q.Dequeue(ctx)
+		if err != nil {
+			<-sem
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				wg.Wait()
+				return nil
+			}
+			if errors.Is(err, queue.ErrMalformed) {
+				log.Error("skipping malformed job", "err", err)
+				continue
+			}
+			log.Error("dequeue failed", "err", err)
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				return nil
+			case <-time.After(time.Second):
+			}
+			continue
+		}
+
+		wg.Add(1)
+		go func(job queue.Job) {
+			defer wg.Done()
+			started := time.Now()
+			err := h.Handle(ctx, job)
+			<-sem
+			if errors.Is(err, queue.ErrDefer) {
+				// The slot is free so a dependency can run. Wait
+				// briefly so a not-ready job does not spin.
+				timer := time.NewTimer(300 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+				case <-timer.C:
+				}
+				enqCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				if enqErr := q.Enqueue(enqCtx, job); enqErr != nil {
+					log.Error("requeue deferred job failed", "id", job.ID, "err", enqErr)
+				}
+				cancel()
+				return
+			}
+			log.Info("job finished",
+				"id", job.ID,
+				"type", job.Type,
+				"duration_ms", time.Since(started).Milliseconds(),
+				"ok", err == nil,
+			)
+			if err != nil {
+				log.Error("job handler failed", "id", job.ID, "type", job.Type, "err", err)
+			}
+		}(job)
 	}
 }

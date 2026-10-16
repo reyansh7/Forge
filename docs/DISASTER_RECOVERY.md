@@ -39,7 +39,7 @@ After restore:
 
 1. Confirm `.forge/data.key` (or `FORGE_DATA_KEY`) is the **same** key used when the dump was taken.
 2. Restart `cmd/api` and `cmd/worker` so they migrate (idempotent) and the worker reloads Caddy from LIVE rows.
-3. Redis need not be restored. In-flight `queued` rows will not have a LIST entry — enqueue those deployments again.
+3. Redis need not be restored. In-flight `queued` rows will not have a LIST entry — use **Re-queue** on each, or `POST /deployments/{id}/retry`. Rows already past `queued` need Stop, then a new Deploy.
 4. `GET /health` then `GET /operator/status` (session required).
 
 ## Restore drill (exit criterion)
@@ -57,7 +57,14 @@ Do not run restore against a database you are not willing to overwrite.
 
 ## Redis-loss behavior
 
-A Redis restart empties every `forge:jobs:{node_id}` list. PostgreSQL still has `queued` / in-progress rows. The worker will not see those jobs until someone enqueues again. That is accepted in this phase. Do not promote Redis to a durable workflow engine.
+A Redis restart empties every `forge:jobs:{node_id}` list. PostgreSQL still has the deployment rows. See `docs/DEPLOYMENT_RECOVERY.md` for the crash table.
+
+- A `queued` row with no lease can be **Re-queue**d immediately (`POST /deployments/{id}/retry`), or the API/worker sweeper does it after the grace period, up to two automatic tries.
+- A row in `detecting` or `building` whose lease expired is re-queued the same way, or marked `failed` once `recovery_count` is exhausted.
+- A row in `provisioning`, `deploying`, or `health_check` with an expired lease is marked `failed` and that attempt's container is stopped. The previous `live` row is not replaced.
+- A popped message is not replayed by Redis. Ownership is the Postgres lease, not an ack on the list.
+
+Do not promote Redis to a durable workflow engine.
 
 ## Worker node death
 

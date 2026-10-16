@@ -25,6 +25,7 @@ type IdentityStore interface {
 	UserCount(ctx context.Context) (int, error)
 	CreateFirstUser(ctx context.Context, username, passwordHash string) (store.User, error)
 	CreateUser(ctx context.Context, username, passwordHash string) (store.User, error)
+	GetUser(ctx context.Context, id string) (store.User, error)
 	GetUserByUsername(ctx context.Context, username string) (store.User, error)
 	LookupSession(ctx context.Context, tokenHash string) (store.User, error)
 	CreateSession(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
@@ -113,7 +114,13 @@ func isPublicPath(method, path string) bool {
 		return true
 	case method == http.MethodPost && path == "/auth/login":
 		return true
+	case method == http.MethodGet && path == "/auth/github":
+		return true
 	case method == http.MethodPost && path == "/auth/logout":
+		return true
+	case method == http.MethodGet && path == "/integrations/github/callback":
+		return true
+	case method == http.MethodPost && strings.HasPrefix(path, "/webhooks/github/"):
 		return true
 	default:
 		return false

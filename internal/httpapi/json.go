@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 )
 
@@ -39,4 +41,20 @@ func decodeJSON(r *http.Request, w http.ResponseWriter, dst any) bool {
 		return false
 	}
 	return true
+}
+
+// decodeOptionalJSON is decodeJSON that treats an empty body as success.
+// Stop and restart stay compatible with clients that POST with no JSON.
+func decodeOptionalJSON(r *http.Request, w http.ResponseWriter, dst any) bool {
+	if r.Body == nil || r.Body == http.NoBody {
+		return true
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	dec := json.NewDecoder(r.Body)
+	err := dec.Decode(dst)
+	if err == nil || errors.Is(err, io.EOF) {
+		return true
+	}
+	writeError(w, http.StatusBadRequest, "invalid JSON body")
+	return false
 }

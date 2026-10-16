@@ -38,9 +38,9 @@ Future-phase work must not be implemented merely because it is known to be requi
 
 | Kind | Phases | Meaning |
 |------|--------|---------|
-| **CURRENT** | 0, 1, 2, 3, 4, 5, 6 | Implemented. Local loopback PaaS with operator auth, observability, TLS opt-in, quotas, backup, and a second worker node. |
-| **NEXT** | 7 | Next authorized work only after `START PHASE 7`. |
-| **FUTURE** | 7–10 | Documented sequence. Not authorized. |
+| **CURRENT** | 0, 1, 2, 3, 4, 5, 6, 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8, 7.9, 7.10, 7.11 | Implemented through Phase 6 plus Phase 7 increments 7.1–7.11 (service links, volumes, preview/production, rolling deploy, env-isolated volumes, custom domains + ACME, GitHub OAuth + webhooks + auto deploy, deployment lease and recovery sweep, personal allowlist + platform hostnames, project Deploy All, workspace diagnostics). AWS apply is still operator work (`docs/AWS.md`). |
+| **NEXT** | 7 (further increments) | Remaining Phase 7 items only after the developer names the increment (or `START PHASE 7` again with a pick). |
+| **FUTURE** | 8–10 | Documented sequence. Not authorized. |
 
 Security requirements apply in every phase. Phases 3 and 5 add **depth**; they do not mark the start of security.
 
@@ -54,7 +54,7 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 4 Observability             COMPLETE
 5 Production hardening      COMPLETE
 6 Multi-node infrastructure   COMPLETE
-7 Advanced platform
+7 Advanced platform          IN PROGRESS (7.1–7.11)
 8 Cloud / AWS readiness
 9 High availability / scaling
 10 Multi-region / operational intelligence
@@ -193,9 +193,9 @@ Deepen isolation and introduce **control-plane identity**. Security already appl
 - `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `GET /auth/status`
 - bcrypt password hashes; sessions store SHA-256 of the token, not the token
 - Bearer `Authorization` and `forge_session` cookie. A new login/signup replaces the cookie and revokes the previous session presented by that browser. Cookie wins if both are present.
-- All control-plane routes except `/health`, `/auth/status`, `/auth/bootstrap`, `/auth/signup`, `/auth/login`, `/auth/logout` require a session
+- All control-plane routes except `/health`, `/auth/status`, `/auth/bootstrap`, `/auth/signup`, `/auth/login`, `/auth/github`, `/auth/logout`, `/integrations/github/callback`, and `POST /webhooks/github/{id}` (HMAC required) require a session
 - Projects have `owner_id`. A UUID in the path is not proof of access (wrong owner → 404)
-- Dashboard `/login` asks for Sign in first; a “create an account” link opens Sign up (name + password + confirm)
+- Dashboard `/login` asks for Sign in first; a “create an account” link opens Sign up (name + password + confirm). **Continue with GitHub** is on the same page when the OAuth app is configured
 
 **3.b Workload and build isolation**
 
@@ -336,7 +336,7 @@ A second worker process (`FORGE_NODE_NAME` + join token) consumes `forge:jobs:{i
 
 ## 10. Phase 7 — Advanced Platform Capabilities
 
-**Status: FUTURE.** Do not implement until `START PHASE 7`.
+**Status: IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.9 complete. 7.8 is the deployment lease and recovery sweep (`docs/DEPLOYMENT_RECOVERY.md`). 7.9 is the personal allowlist and `{slug}.{FORGE_APPS_DOMAIN}` hostnames. 7.10 is project Deploy All: one action queues the existing per-service jobs and holds previous containers until every required service is live. If a required service fails after another was promoted, compensation restores those services in reverse promotion order and records a failure when the previous container is gone, the database restore fails, or Caddy does not switch back. 7.11 is workspace-quota diagnostics and per-stage deploy timings. It does not raise the 256 MiB default. The operator backup drill is still required before any AWS claim. Do not implement the rest of the list until the developer picks the next increment.
 
 ### Objective
 
@@ -346,20 +346,64 @@ PaaS product depth **on** a secure, observable, multi-node-capable (or still sin
 
 Phase 5 at minimum. Phase 6 if the feature needs more than one node.
 
-### Capabilities (pick increments; do not implement the list at once)
+### Increment 7.1 — same-project service links (COMPLETE)
 
-- Preview / staging vs production **semantics**
-- Zero-downtime / rolling / canary **on top of existing rollback**
-- Public custom domains (DNS), building on Phase 5 TLS
-- Persistent volumes
+Operator declares that application A receives application B’s Host URL as an env key on the next deploy. Same project only. No overlay mesh. No custom domains.
+
+### Increment 7.2 — persistent volumes (COMPLETE)
+
+Operator declares a Docker **named** volume mounted at a container path. Data survives Stop + Deploy. Host bind mounts are rejected. Volumes are node-local; placement prefers the last node when volumes exist. No size quota, no sharing across apps, no live migrate.
+
+### Increment 7.3 — preview vs production (COMPLETE)
+
+Each application has two first-class environments: `production` and `preview`. One LIVE row per `(application_id, environment)`. Production keeps `{slug}.localhost`. Preview is `{slug}-preview.localhost`. At 7.3, preview did not mount named volumes (isolation by omission). Increment 7.5 gives preview its own Docker volume names. Service links still inject the production Host URL. Chat named this increment “7.2”; persistent volumes already occupied that number, so the repository records it as 7.3.
+
+### Increment 7.4 — rolling deployments (COMPLETE)
+
+A new container starts beside the current LIVE container. Caddy switches the Host only after health checks pass. Then the previous container is stopped. A failed deploy leaves the previous LIVE version running. Preview and production roll independently. Not canary (no split traffic), not live migrate across nodes.
+
+### Increment 7.5 — persistent volumes, environment isolation (COMPLETE)
+
+Operator-declared named volumes already existed (7.2). This increment mounts them on **both** environments with isolated Docker names (`forgevol_<app>_<name>` production, `forgevol_<app>_preview_<name>` preview) so trial data cannot clobber live files. Rolling deploys remount the same env-scoped volume while the old container is still up; `docker rm` never passes `-v`. The worker never deletes volumes. Operator delete is blocked while any environment is LIVE and removes both Docker names. Chat named this increment “Phase 7.5”; 7.2 remains the original volume schema. No new migration.
+
+### Increment 7.6 — custom domains + ACME TLS (COMPLETE)
+
+Operator adds a public hostname to an application environment. The name is unique across every application. Ownership is a DNS TXT at `_forge-challenge.<hostname>` before Caddy routes it. Verified domains become dedicated Caddy sites with `tls { issuer acme }` (Let's Encrypt). `*.localhost` and `/d/{id}/` stay on catch-all `:80` / `:443` with `tls internal` and `auto_https off`. ACME certs persist in the Caddy `/data` volume. Not wildcards, not DNS-01, not GitHub, not publishing `:2019`.
+
+### Increment 7.7 — GitHub OAuth + webhooks + auto deploy (COMPLETE)
+
+Operators connect a GitHub account (OAuth App via `FORGE_GITHUB_CLIENT_ID` / `FORGE_GITHUB_CLIENT_SECRET`), pick owner/repo + branch, and Forge creates a `push` webhook. Tokens and webhook secrets are sealed at rest and never returned to the dashboard. `POST /webhooks/github/{application_id}` is public but HMAC-verified (`X-Hub-Signature-256`). Duplicate `X-GitHub-Delivery` is ignored. A matching branch push creates a queued deployment with commit SHA/message/author and RPUSH `TypeDeploy` — the same rolling pipeline as the Deploy button (preview/production, volumes, domains, TLS). Manual deploy is unchanged. GitHub Actions is not used. Chat named this increment; it was not on the remaining-7 list, so the repository records it as 7.7.
+
+The login page also offers **Continue with GitHub** (`GET /auth/github`, same OAuth app and callback). A `github_oauth_states` row with a NULL `user_id` is a sign-in. The callback requires the `forge_github_state` cookie from the browser that started it. Identity match is `github_user_id`. A new GitHub user gets a Forge user with a random unused password hash. A password account is not taken over because the GitHub login string matches its username. Connecting a repo stays on the application GitHub tab.
+
+### Increment 7.8 — deployment lease and recovery sweep (COMPLETE)
+
+A worker lease and an API/worker sweeper. Lost queued messages and expired leases on `detecting`/`building` are re-queued at most twice. Expired leases on `provisioning` and later fail that attempt and stop its container without replacing the previous live row. Stale job ids and lost leases cannot cut over. Not a durable queue product and not Phase 8. The operator backup/restore drill is still required before any AWS claim.
+
+### Increment 7.9 — personal allowlist and platform hostnames (COMPLETE)
+
+GitHub login and GitHub connect require `FORGE_GITHUB_ALLOWED_USER_IDS` (numeric GitHub user ids). An empty list refuses both. Webhook trust stays the HMAC check. When `FORGE_APPS_DOMAIN` is set, Forge reserves `https://{slug}.{zone}/` as an active `application_domains` row with `origin=platform` (migration 0017). Those names skip the TXT challenge. Custom domains under that zone are rejected. Caddy routes platform hosts and an optional `FORGE_CONTROL_HOST` (dashboard + `/forge-api` webhooks) only when the zone is set, reusing the 7.6 per-hostname ACME issuer. Local Compose stays on loopback. `deploy/aws/` and `docs/AWS.md` are the single-host install package (public 80/443 only). Not DNS-01, not a wildcard certificate, not an applied AWS account.
+
+### Increment 7.10 — project Deploy All (partial)
+
+`POST /projects/{id}/deploy` snapshots `detect.Discover`, ensures one application per selected service (Go `build_package` such as `./cmd/api` stays at the module root), creates a `project_deployments` saga (migration 0019), and queues the existing per-application deploy jobs. Independent services may build together up to `FORGE_MAX_INFLIGHT_PER_NODE`. A service waits until a lower-ranked dependency is live or failed. Obvious one-frontend/one-backend and one-backend/one-ML pairs become service links. Backends, workers, and ML services stay off Caddy unless `local_host` is set; they join a per-project Docker bridge (`forgep-` plus the project id). Link env keys are unchanged. A private target's value is its bridge URL. A public target keeps the Caddy URL.
+
+The previous container is kept until every required service is live (migration 0020). If a required service fails after another was promoted, compensation restores the previous release in reverse promotion order and records a failure when the previous container is gone, the database restore fails, or Caddy does not switch back. That does not reverse database migrations or delete volumes. A Go build error that names exactly one `./cmd/<name>` is repaired by setting `build_package` and rebuilding once. Two commands are not guessed. An unhealthy release is not promoted.
+
+### Increment 7.11 — workspace diagnostics (COMPLETE)
+
+Authorized in chat as the measurement increment after 7.10. A fetched tree that exceeds `FORGE_WORKSPACE_MAX_BYTES` (default `256 << 20`, 256 MiB) fails before build with the configured limit, the measured regular-file total, and the largest few relative paths. Symlinks are not followed. The error is the application quota, not a full host disk. The worker logs `deploy measurements` with fetch, detect, build, container-start, health, and total durations. Stages that did not run are `unavailable`, not 0. `transferred_bytes` is always `unavailable` because shallow `git clone` does not report wire size. `workspace_bytes` is the extracted regular-file sum when the walk finishes. No migration. The default cap is unchanged. Not BuildKit, not archive fetch, not a larger quota.
+
+### Remaining capabilities (do not implement the list at once)
+
+- Zero-downtime **canary** (weighted split) **on top of rolling + rollback**
 - Scheduled jobs
 - Managed-style databases/Redis for **apps** (not replacing control-plane Postgres/Redis)
-- Service discovery and explicit app-to-app networking
 - Team permissions (beyond single-operator auth)
 - Build caching with cache poisoning treated as a security issue
 - Extensibility hooks (detect/notify) without host exec
 
-**Already exists (do not re-list as greenfield):** image rollback, HTTP health gate, env vars, log snapshots, `.localhost` DX.
+**Already exists (do not re-list as greenfield):** image rollback, HTTP health gate, env vars, log snapshots, `.localhost` DX, same-project service links (7.1), persistent named volumes (7.2), preview vs production (7.3), rolling cutover (7.4), environment-isolated volume mounts (7.5), custom domains + Caddy ACME (7.6), GitHub OAuth + auto deploy (7.7), deployment lease and recovery sweep (7.8), personal GitHub allowlist and platform hostnames (7.9), project Deploy All with reverse-order compensation (7.10), workspace-quota diagnostics and stage timings (7.11).
 
 **Not in this phase:** billing as a reason to weaken isolation; AWS account creation.
 
@@ -497,6 +541,8 @@ Before moving forward:
 
 **Phase 6 — COMPLETE** (authorized `START PHASE 6`)
 
+**Phase 7 — IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.11 done (service links, volumes, preview/production, rolling, env-isolated volumes, custom domains + ACME, GitHub OAuth + webhooks + auto deploy, deployment lease and recovery sweep, personal allowlist and platform hostnames, project Deploy All, workspace diagnostics and stage timings). Cron, team RBAC, canary, managed app datastores, build cache, and hooks are not implemented. The Postgres backup drill is not marked done. AWS is documented in `docs/AWS.md` and is not applied.
+
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
 Increment 0.2 (done): `projects` table, migrations, and `POST/GET /projects`.
@@ -515,7 +561,29 @@ Phase 4 (done): structured API/worker logs; authorized SSE log follow; `/metrics
 
 Phase 5 (done): opt-in API TLS; Caddy `tls internal` on `127.0.0.1:9443`; env AES-GCM at rest; project/deploy/workspace/log quotas; deploy rate limit; `cmd/backup`; `docs/DISASTER_RECOVERY.md` + `docs/UPGRADES.md`; `FORGE_ALLOW_PUBLIC_BIND` for `0.0.0.0`. Still one node. Not ACME, not a vault, not multi-node.
 
-Phase 6 (done): `nodes` table; `EnsureLocalNode`; join token; heartbeat / stale → dead; `internal/schedule`; `forge:jobs:{node_id}`; Caddy advertise host; Observe nodes. Not live migrate, not AWS, not Phase 7 service graphs.
+Phase 6 (done): `nodes` table; `EnsureLocalNode`; join token; heartbeat / stale → dead; `internal/schedule`; `forge:jobs:{node_id}`; Caddy advertise host; Observe nodes. Not live migrate, not AWS. A queued deploy whose Redis job was lost is re-queued with `POST /deployments/{id}/retry` (`active_job_id` in migration 0014). `FORGE_ALLOW_PUBLIC_BIND=1` also requires API TLS and a non-default Postgres password.
+
+Phase 7.8 (done as a recovery gate, not a new product feature): worker lease (`0015_deployment_lease.sql`), sweeper for expired leases and lost queued messages, bounded automatic re-queue, owned status writes so a stale pipeline cannot cut over. Documented in `docs/DEPLOYMENT_RECOVERY.md`. This is not Phase 8. The backup/restore drill is still an operator step and is not marked done by unit tests. AWS remains Phase 8.
+
+Phase 7.1 (done): `application_links`; worker injects sibling `{slug}.localhost` URLs; dashboard Services tab. Not a mesh, not custom domains.
+
+Phase 7.2 (done): `application_volumes`; worker mounts Forge-owned Docker named volumes; dashboard Storage tab. Not host binds, not a mesh, not size quotas.
+
+Phase 7.3 (done): `deployments.environment` (`preview`|`production`); unique LIVE per app+env; preview Host `{slug}-preview.localhost`; dashboard environment selector. Not custom domains, not staging as a third slot, not canary.
+
+Phase 7.4 (done): rolling cutover — new container + health + Caddy Host switch, then stop previous. Failed health keeps LIVE. Not canary.
+
+Phase 7.5 (done): preview and production mount isolated Docker named volumes; rolling remounts the same env volume without `docker volume rm`. Not size quotas, not host binds, not managed databases.
+
+Phase 7.6 (done): `application_domains`; DNS TXT ownership; Caddy ACME site blocks for verified hostnames; `.localhost` unchanged. Not wildcards, not DNS-01, not GitHub.
+
+Phase 7.7 (done): GitHub OAuth connect/disconnect; repo+branch binding; HMAC webhooks; delivery-id dedupe; auto-deploy reuses `TypeDeploy` with commit metadata. Tokens never in JSON. Not GitHub Actions, not a second pipeline. Sign-in with GitHub uses the same OAuth app (`GET /auth/github`); it matches `github_user_id` and does not take over a password account by name.
+
+Phase 7.8 (done): `lease_until` and `recovery_count`; worker renews the lease; API and worker sweep expired leases and queued rows whose message was never taken. Early stages re-queue at most twice. Later stages fail closed without replacing the previous live row. Not AWS, not a durable Redis, not HA.
+
+Phase 7.9 and 7.10 (done): personal allowlist, platform hostnames, and project Deploy All with reverse-order compensation. The full write-up is in section 10.
+
+Phase 7.11 (done): workspace quota failures name the limit, measured regular-file bytes, and the largest few relative paths. `deploy measurements` logs stage durations. `transferred_bytes` is `unavailable`. Default cap stays 256 MiB. Not build cache, not a larger quota.
 
 ---
 

@@ -48,7 +48,7 @@ func TestDockerLogsFollowArgs(t *testing.T) {
 }
 
 func TestDockerRunArgsDropCapabilities(t *testing.T) {
-	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080)
+	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +68,71 @@ func TestDockerRunArgsDropCapabilities(t *testing.T) {
 	if strings.Contains(joined, "--privileged") || strings.Contains(joined, "docker.sock") {
 		t.Fatalf("forbidden flag: %q", joined)
 	}
-	if !strings.HasPrefix(args[len(args)-3], "127.0.0.1:") && !containsPair(args, "-p", "127.0.0.1:9:8080") {
+	if !containsPair(args, "-p", "127.0.0.1:9:8080") {
 		t.Fatalf("publish: %q", joined)
+	}
+}
+
+func TestDockerRunArgsNamedVolume(t *testing.T) {
+	name := "forgevol_aaaaaaaabbbbccccddddeeeeeeeeeeee_data"
+	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, []VolumeMount{
+		{Name: name, Path: "/data"},
+	}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPair(args, "-v", name+":/data") {
+		t.Fatalf("named volume: %q", strings.Join(args, " "))
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "docker.sock") || strings.Contains(joined, "/var/run") {
+		t.Fatalf("forbidden path: %q", joined)
+	}
+}
+
+func TestDockerRunArgsPreviewVolume(t *testing.T) {
+	name := "forgevol_aaaaaaaabbbbccccddddeeeeeeeeeeee_preview_data"
+	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, []VolumeMount{
+		{Name: name, Path: "/data"},
+	}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPair(args, "-v", name+":/data") {
+		t.Fatalf("preview volume: %q", strings.Join(args, " "))
+	}
+}
+
+func TestDockerRunArgsRejectsHostBind(t *testing.T) {
+	if _, err := dockerRunArgs("forgeimg", "c", "127.0.0.1:9:8080", nil, 8080, []VolumeMount{
+		{Name: "/var/run/docker.sock", Path: "/var/run/docker.sock"},
+	}, "", ""); err == nil {
+		t.Fatal("host bind")
+	}
+	if _, err := dockerRunArgs("forgeimg", "c", "127.0.0.1:9:8080", nil, 8080, []VolumeMount{
+		{Name: "forgevol_aaaaaaaabbbbccccddddeeeeeeeeeeee_data", Path: "/etc"},
+	}, "", ""); err == nil {
+		t.Fatal("reserved path")
+	}
+}
+
+func TestDockerRunArgsProjectNetworkStaysLoopback(t *testing.T) {
+	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, nil, "forgep-aaaaaaaabbbb", "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !containsPair(args, "--network", "forgep-aaaaaaaabbbb") || !containsPair(args, "--network-alias", "api") {
+		t.Fatalf("%s", joined)
+	}
+	if strings.Contains(joined, "--network host") || strings.Contains(joined, "0.0.0.0:") {
+		t.Fatalf("%s", joined)
+	}
+	if !containsPair(args, "-p", "127.0.0.1:9:8080") {
+		t.Fatalf("%s", joined)
+	}
+	if _, err := dockerRunArgs("forgeimg", "c", "127.0.0.1:9:8080", nil, 8080, nil, "host", "api"); err == nil {
+		t.Fatal("host network must be rejected")
 	}
 }
 

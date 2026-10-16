@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -25,6 +26,14 @@ func newMemDeployments() *memDeployments {
 }
 
 func (m *memDeployments) CreateDeployment(_ context.Context, applicationID string) (store.Deployment, error) {
+	return m.CreateDeploymentIn(context.Background(), applicationID, store.EnvProduction)
+}
+
+func (m *memDeployments) CreateDeploymentIn(_ context.Context, applicationID, environment string) (store.Deployment, error) {
+	env, err := store.ParseEnvironment(environment)
+	if err != nil {
+		return store.Deployment{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seq++
@@ -34,6 +43,7 @@ func (m *memDeployments) CreateDeployment(_ context.Context, applicationID strin
 		ProjectID:     "00000000-0000-4000-8000-000000000001",
 		ApplicationID: applicationID,
 		Status:        store.StatusQueued,
+		Environment:   env,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
@@ -48,7 +58,7 @@ func (m *memDeployments) CreateRollbackDeployment(ctx context.Context, sourceID 
 	if !ok || src.ImageName == "" {
 		return store.Deployment{}, store.ErrNotFound
 	}
-	d, err := m.CreateDeployment(ctx, src.ApplicationID)
+	d, err := m.CreateDeploymentIn(ctx, src.ApplicationID, envOf(src))
 	if err != nil {
 		return store.Deployment{}, err
 	}
@@ -117,6 +127,36 @@ func (m *memDeployments) CountInProgressByOwner(_ context.Context, _ string) (in
 		}
 	}
 	return n, nil
+}
+
+func (m *memDeployments) SetDeploymentCommit(_ context.Context, id string, meta store.CommitMeta) (store.Deployment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.byID[id]
+	if !ok {
+		return store.Deployment{}, store.ErrNotFound
+	}
+	meta = store.SanitizeCommitMeta(meta)
+	d.CommitSHA = meta.SHA
+	d.CommitMessage = meta.Message
+	d.CommitAuthor = meta.Author
+	m.byID[id] = d
+	return d, nil
+}
+
+func (m *memDeployments) ClaimQueuedJob(_ context.Context, id, jobID string) (store.Deployment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.byID[id]
+	if !ok {
+		return store.Deployment{}, store.ErrNotFound
+	}
+	if d.Status != store.StatusQueued {
+		return store.Deployment{}, fmt.Errorf("%w: only a queued deployment can be re-queued", store.ErrConflict)
+	}
+	d.ActiveJobID = jobID
+	m.byID[id] = d
+	return d, nil
 }
 
 func (m *memDeployments) UpdateDeployment(_ context.Context, d store.Deployment) error {
@@ -379,5 +419,141 @@ func TestRollbackAccepted(t *testing.T) {
 	}
 	if jobs.last.Type != queue.TypeDeploy {
 		t.Fatalf("job type = %q", jobs.last.Type)
+	}
+}
+
+func TestRollbackWhileLiveAccepted(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          store.DefaultApplicationName,
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	live, err := deps.CreateDeployment(context.Background(), app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Status = store.StatusLive
+	live.ImageName = "forge-app-old"
+	live.RuntimeKind = "dockerfile"
+	_ = deps.UpdateDeployment(context.Background(), live)
+
+	srv := deployServer(mem, apps, deps, &stubJobs{})
+	srv.Runtime = &stubRuntime{running: true}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/deployments/"+live.ID+"/rollback", bytes.NewReader([]byte(`{}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := deps.GetDeployment(context.Background(), live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusLive {
+		t.Fatalf("live source must stay up until cutover, got %q", got.Status)
+	}
+}
+
+func TestRequeueQueuedDeployment(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          store.DefaultApplicationName,
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	jobs := &stubJobs{}
+	srv := deployServer(mem, apps, deps, jobs)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/applications/"+app.ID+"/deployments", bytes.NewReader([]byte(`{}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var created createDeploymentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	first := jobs.last.ID
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/deployments/"+created.ID+"/retry", bytes.NewReader([]byte(`{}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("retry status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if jobs.last.ID == "" || jobs.last.ID == first {
+		t.Fatalf("re-queue job id = %q, first = %q", jobs.last.ID, first)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(jobs.last.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["deployment_id"] != created.ID {
+		t.Fatalf("payload deployment_id = %q", payload["deployment_id"])
+	}
+	got, err := deps.GetDeployment(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusQueued || got.ActiveJobID != jobs.last.ID {
+		t.Fatalf("status=%q job=%q want queued %q", got.Status, got.ActiveJobID, jobs.last.ID)
+	}
+}
+
+func TestRequeueRejectsFailed(t *testing.T) {
+	mem := newMemProjects()
+	p, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "demo",
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := newMemApps()
+	app, err := apps.CreateApplication(context.Background(), p.ID, store.ApplicationInput{
+		Name:          store.DefaultApplicationName,
+		RepositoryURL: store.SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := newMemDeployments()
+	d, err := deps.CreateDeployment(context.Background(), app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Status = store.StatusFailed
+	d.FailedStage = string(store.StatusBuilding)
+	if err := deps.UpdateDeployment(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	srv := deployServer(mem, apps, deps, &stubJobs{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/deployments/"+d.ID+"/retry", bytes.NewReader([]byte(`{}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }

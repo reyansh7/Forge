@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,6 +56,8 @@ type applicationResponse struct {
 	RootDirectory string    `json:"root_directory"`
 	HealthPath    string    `json:"health_path"`
 	LocalHost     string    `json:"local_host"`
+	BuildPackage  string    `json:"build_package,omitempty"`
+	PlatformURL   string    `json:"platform_url,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
@@ -68,9 +71,44 @@ func applicationResponseFrom(a store.Application) applicationResponse {
 		RootDirectory: a.RootDirectory,
 		HealthPath:    a.HealthPath,
 		LocalHost:     a.LocalHost,
+		BuildPackage:  a.BuildPackage,
 		CreatedAt:     a.CreatedAt.UTC(),
 		UpdatedAt:     a.UpdatedAt.UTC(),
 	}
+}
+
+func (s *Server) applicationJSON(a store.Application) applicationResponse {
+	out := applicationResponseFrom(a)
+	slug := a.LocalHost
+	if slug == "" {
+		slug = store.SuggestedLocalHost(a.Name, a.ID)
+	}
+	out.PlatformURL = store.PlatformURL(slug, s.AppsDomain)
+	return out
+}
+
+// syncPlatformHost reserves {slug}.{apps domain} when the operator
+// configured a zone. A conflict means another application already owns
+// that hostname. Tests whose domain fake has no Ensure method skip this.
+func (s *Server) syncPlatformHost(ctx context.Context, app store.Application) error {
+	if s == nil || strings.TrimSpace(s.AppsDomain) == "" || s.Domains == nil {
+		return nil
+	}
+	p, ok := s.Domains.(interface {
+		EnsurePlatformHost(ctx context.Context, applicationID, slug, appsDomain string) (store.ApplicationDomain, error)
+	})
+	if !ok {
+		return nil
+	}
+	slug := app.LocalHost
+	if slug == "" {
+		slug = store.SuggestedLocalHost(app.Name, app.ID)
+	}
+	if host, err := store.PlatformHostname(slug, s.AppsDomain); err == nil && strings.EqualFold(host, s.ControlHost) {
+		return fmt.Errorf("%w: %s is reserved for the control plane", store.ErrConflict, host)
+	}
+	_, err := p.EnsurePlatformHost(ctx, app.ID, slug, s.AppsDomain)
+	return err
 }
 
 type applicationBody struct {
@@ -79,6 +117,9 @@ type applicationBody struct {
 	RootDirectory string `json:"root_directory"`
 	HealthPath    string `json:"health_path"`
 	LocalHost     string `json:"local_host"`
+	// BuildPackage is omitted by the settings form. Nil keeps the
+	// stored package so a save does not clear ./cmd/api.
+	BuildPackage *string `json:"build_package,omitempty"`
 }
 
 type envVarResponse struct {
@@ -110,6 +151,14 @@ func (s *Server) createApplication(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.BuildPackage != nil {
+		pkg, err := store.ValidateBuildPackage(*req.BuildPackage)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		in.BuildPackage = pkg
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
@@ -129,7 +178,16 @@ func (s *Server) createApplication(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Location", "/applications/"+app.ID)
-	writeJSON(w, http.StatusCreated, applicationResponseFrom(app))
+	if err := s.syncPlatformHost(ctx, app); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		s.logger().Error("reserve platform hostname failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to reserve platform hostname")
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.applicationJSON(app))
 	s.audit(r, "", "application.create", "application", app.ID, map[string]string{"name": app.Name, "project_id": projectID})
 }
 
@@ -156,7 +214,7 @@ func (s *Server) listApplications(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]applicationResponse, 0, len(list))
 	for _, a := range list {
-		out = append(out, applicationResponseFrom(a))
+		out = append(out, s.applicationJSON(a))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -166,7 +224,7 @@ func (s *Server) getApplication(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, applicationResponseFrom(app))
+	writeJSON(w, http.StatusOK, s.applicationJSON(app))
 }
 
 func (s *Server) updateApplication(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +246,15 @@ func (s *Server) updateApplication(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	in.BuildPackage = app.BuildPackage
+	if req.BuildPackage != nil {
+		pkg, err := store.ValidateBuildPackage(*req.BuildPackage)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		in.BuildPackage = pkg
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	app, err = s.Apps.UpdateApplication(ctx, id, in)
@@ -204,8 +271,17 @@ func (s *Server) updateApplication(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update application")
 		return
 	}
+	if err := s.syncPlatformHost(ctx, app); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		s.logger().Error("reserve platform hostname failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to reserve platform hostname")
+		return
+	}
 	s.audit(r, "", "application.update", "application", app.ID, map[string]string{"name": app.Name})
-	writeJSON(w, http.StatusOK, applicationResponseFrom(app))
+	writeJSON(w, http.StatusOK, s.applicationJSON(app))
 }
 
 func (s *Server) deleteApplication(w http.ResponseWriter, r *http.Request) {
@@ -218,14 +294,27 @@ func (s *Server) deleteApplication(w http.ResponseWriter, r *http.Request) {
 
 	// Stop first so ON DELETE CASCADE cannot leave a running container
 	// whose deployment row is gone.
-	if live, found, err := s.liveDeployment(ctx, app.ID); err != nil {
+	if liveRows, err := s.liveDeployments(ctx, app.ID); err != nil {
 		s.logger().Error("list deployments before delete failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to delete application")
 		return
-	} else if found {
-		s.haltLive(ctx, live, "stopped by operator")
+	} else {
+		for _, live := range liveRows {
+			s.haltLive(ctx, live, "stopped by operator")
+		}
+	}
+	if s.Deployments != nil {
+		list, err := s.Deployments.ListDeploymentsByApplication(ctx, app.ID)
+		if err == nil {
+			for _, d := range list {
+				if d.Status.InProgress() {
+					s.abandonInProgress(ctx, d, "stopped by operator")
+				}
+			}
+		}
 	}
 
+	s.removeApplicationVolumes(ctx, app.ID)
 	if err := s.Apps.DeleteApplication(ctx, app.ID); err != nil {
 		s.logger().Error("delete application failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to delete application")
@@ -244,13 +333,13 @@ func (s *Server) createApplicationDeployment(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	var ignore struct{}
-	if !decodeJSON(r, w, &ignore) {
+	env, ok := readEnvironment(r, w, false)
+	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
-	s.enqueueDeployment(w, r, ctx, app.ID)
+	s.enqueueDeployment(w, r, ctx, app.ID, env)
 }
 
 func (s *Server) listApplicationDeployments(w http.ResponseWriter, r *http.Request) {
@@ -296,9 +385,15 @@ func (s *Server) getApplicationLogs(w http.ResponseWriter, r *http.Request) {
 		tail = n
 	}
 
+	env, err := parseRequestEnvironment(r, "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	live, found, err := s.liveDeployment(ctx, app.ID)
+	live, found, err := s.liveDeployment(ctx, app.ID, env)
 	if err != nil {
 		s.logger().Error("logs: list deployments failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to read logs")
@@ -317,6 +412,7 @@ func (s *Server) getApplicationLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"application_id": app.ID,
 		"deployment_id":  live.ID,
+		"environment":    envOf(live),
 		"tail":           tail,
 		"text":           text,
 	})
@@ -327,9 +423,14 @@ func (s *Server) getApplicationHealth(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	env, err := parseRequestEnvironment(r, "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	live, found, err := s.liveDeployment(ctx, app.ID)
+	live, found, err := s.liveDeployment(ctx, app.ID, env)
 	if err != nil {
 		s.logger().Error("health: list deployments failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to check health")
@@ -338,6 +439,7 @@ func (s *Server) getApplicationHealth(w http.ResponseWriter, r *http.Request) {
 	if !found {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"application_id": app.ID,
+			"environment":    env,
 			"status":         "stopped",
 		})
 		return
@@ -367,6 +469,7 @@ func (s *Server) getApplicationHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"application_id": app.ID,
 		"deployment_id":  live.ID,
+		"environment":    envOf(live),
 		"status":         status,
 		"public_url":     live.PublicURL,
 	})
@@ -374,6 +477,10 @@ func (s *Server) getApplicationHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) stopApplication(w http.ResponseWriter, r *http.Request) {
 	app, ok := s.loadApplication(w, r)
+	if !ok {
+		return
+	}
+	env, ok := readEnvironment(r, w, true)
 	if !ok {
 		return
 	}
@@ -391,10 +498,14 @@ func (s *Server) stopApplication(w http.ResponseWriter, r *http.Request) {
 	}
 	// Stop must cancel BUILDING/QUEUED rows, not only LIVE. Killing the
 	// worker mid-build used to leave InProgress forever, which blocked
-	// the next Deploy.
+	// the next Deploy. Scope to one environment so stopping preview
+	// cannot take production offline.
 	var last store.Deployment
 	n := 0
 	for _, d := range list {
+		if !store.SameEnvironment(d.Environment, env) {
+			continue
+		}
 		switch {
 		case d.Status == store.StatusLive:
 			s.haltLive(ctx, d, "stopped by operator")
@@ -416,8 +527,53 @@ func (s *Server) stopApplication(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "nothing to stop")
 		return
 	}
-	s.audit(r, "", "application.stop", "application", app.ID, map[string]string{"deployment_id": last.ID})
+	s.audit(r, "", "application.stop", "application", app.ID, map[string]string{"deployment_id": last.ID, "environment": env})
 	writeJSON(w, http.StatusOK, deploymentResponseFrom(last))
+}
+
+func (s *Server) restartApplication(w http.ResponseWriter, r *http.Request) {
+	app, ok := s.loadApplication(w, r)
+	if !ok {
+		return
+	}
+	if s.Apps == nil || s.Deployments == nil || s.Jobs == nil {
+		writeError(w, http.StatusInternalServerError, "deployments are not configured")
+		return
+	}
+	// Restart is a rolling deploy of one environment. The LIVE
+	// container stays up until the new one is healthy. In-progress
+	// rows are abandoned so a stuck build cannot block the next job.
+	env, ok := readEnvironment(r, w, true)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	list, err := s.Deployments.ListDeploymentsByApplication(ctx, app.ID)
+	if err != nil {
+		s.logger().Error("restart: list deployments failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to restart application")
+		return
+	}
+	found := false
+	for _, d := range list {
+		if !store.SameEnvironment(d.Environment, env) {
+			continue
+		}
+		if d.Status == store.StatusLive {
+			found = true
+		}
+		if d.Status.InProgress() {
+			s.abandonInProgress(ctx, d, "restarted by operator")
+			found = true
+		}
+	}
+	if !found {
+		writeError(w, http.StatusConflict, "nothing to restart")
+		return
+	}
+	s.audit(r, "", "application.restart", "application", app.ID, map[string]string{"environment": env})
+	s.enqueueDeployment(w, r, ctx, app.ID, env)
 }
 
 func (s *Server) listEnv(w http.ResponseWriter, r *http.Request) {
@@ -575,7 +731,7 @@ func (s *Server) loadApplication(w http.ResponseWriter, r *http.Request) (store.
 	return app, true
 }
 
-func (s *Server) liveDeployment(ctx context.Context, applicationID string) (store.Deployment, bool, error) {
+func (s *Server) liveDeployment(ctx context.Context, applicationID, environment string) (store.Deployment, bool, error) {
 	if s.Deployments == nil {
 		return store.Deployment{}, false, nil
 	}
@@ -584,11 +740,28 @@ func (s *Server) liveDeployment(ctx context.Context, applicationID string) (stor
 		return store.Deployment{}, false, err
 	}
 	for _, d := range list {
-		if d.Status == store.StatusLive {
+		if d.Status == store.StatusLive && store.SameEnvironment(d.Environment, environment) {
 			return d, true, nil
 		}
 	}
 	return store.Deployment{}, false, nil
+}
+
+func (s *Server) liveDeployments(ctx context.Context, applicationID string) ([]store.Deployment, error) {
+	if s.Deployments == nil {
+		return nil, nil
+	}
+	list, err := s.Deployments.ListDeploymentsByApplication(ctx, applicationID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]store.Deployment, 0)
+	for _, d := range list {
+		if d.Status == store.StatusLive {
+			out = append(out, d)
+		}
+	}
+	return out, nil
 }
 
 func (s *Server) abandonInProgress(ctx context.Context, d store.Deployment, notice string) {

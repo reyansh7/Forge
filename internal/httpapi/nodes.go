@@ -22,6 +22,12 @@ type Placer interface {
 	Place(ctx context.Context) (store.Node, error)
 }
 
+// AffinityPlacer is Place with a preferred node (volume locality).
+// *schedule.Scheduler implements this; test stubs may not.
+type AffinityPlacer interface {
+	PlacePrefer(ctx context.Context, preferNodeID string) (store.Node, error)
+}
+
 // JobSink is the HTTP → per-node Redis LIST boundary.
 type JobSink interface {
 	EnqueueOn(ctx context.Context, nodeID string, job queue.Job) error
@@ -148,7 +154,7 @@ func (s *Server) placeDeployment(ctx context.Context, d store.Deployment) (store
 	if s.Placer == nil || s.Sink == nil || s.Nodes == nil {
 		return d, nil
 	}
-	node, err := s.Placer.Place(ctx)
+	node, err := s.placeNode(ctx, d)
 	if err != nil {
 		return d, err
 	}
@@ -158,6 +164,25 @@ func (s *Server) placeDeployment(ctx context.Context, d store.Deployment) (store
 	d.NodeID = node.ID
 	d.NodeAdvertiseHost = node.AdvertiseHost
 	return d, nil
+}
+
+func (s *Server) placeNode(ctx context.Context, d store.Deployment) (store.Node, error) {
+	// Prefer the node already running this environment so rolling
+	// cutover can docker-stop the previous container locally. Volume
+	// affinity is the fallback (named volumes are node-local).
+	prefer := ""
+	if live, ok, err := s.liveDeployment(ctx, d.ApplicationID, d.Environment); err == nil && ok {
+		prefer = strings.TrimSpace(live.NodeID)
+	}
+	if prefer == "" {
+		prefer = s.volumePreferNode(ctx, d.ApplicationID, d.Environment)
+	}
+	if prefer != "" {
+		if ap, ok := s.Placer.(AffinityPlacer); ok {
+			return ap.PlacePrefer(ctx, prefer)
+		}
+	}
+	return s.Placer.Place(ctx)
 }
 
 func (s *Server) failQueuedDeploy(ctx context.Context, d store.Deployment, msg string) {

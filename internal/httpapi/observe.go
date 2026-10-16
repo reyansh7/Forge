@@ -177,8 +177,14 @@ func (s *Server) streamApplicationLogs(w http.ResponseWriter, r *http.Request) {
 		tail = n
 	}
 
+	env, err := parseRequestEnvironment(r, "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	live, found, err := s.liveDeployment(ctx, app.ID)
+	live, found, err := s.liveDeployment(ctx, app.ID, env)
 	cancel()
 	if err != nil {
 		s.logger().Error("log stream: list deployments failed", "err", err)

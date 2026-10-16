@@ -124,6 +124,7 @@ func TestTreeStaticHTML(t *testing.T) {
 func TestTreeIndexHTMLDoesNotBeatGo(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "go.mod"), "module example\n")
+	write(t, filepath.Join(dir, "main.go"), "package main\nfunc main() {}\n")
 	write(t, filepath.Join(dir, "index.html"), "<h1>docs</h1>\n")
 	got, err := Tree(dir)
 	if err != nil {

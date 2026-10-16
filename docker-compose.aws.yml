@@ -1,0 +1,16 @@
+# Public ingress overlay for one host you control.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d
+#
+# Adds public 80 and 443 on Caddy. The base file already publishes
+# Postgres, Redis, and Caddy admin on 127.0.0.1 only. Do not add those
+# ports here. App containers stay on loopback host ports; Caddy is the
+# only public reverse proxy.
+#
+# Let's Encrypt needs the hostname's A record pointed at this machine
+# before the worker loads a site for it. See docs/AWS.md.
+services:
+  caddy:
+    ports:
+      - "80:80"
+      - "443:443"

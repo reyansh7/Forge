@@ -57,6 +57,10 @@ var (
 
 	// ErrUnknownType means Type is not in the worker's allowlist.
 	ErrUnknownType = errors.New("unknown job type")
+	// ErrDefer means the job was taken off the list before its
+	// dependencies were ready. The worker must Enqueue it again.
+	// Leaving it un-queued drops the only copy Redis had.
+	ErrDefer = errors.New("defer job until dependencies are ready")
 )
 
 // Job is the JSON blob stored on the Redis LIST.

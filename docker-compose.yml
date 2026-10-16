@@ -46,9 +46,12 @@ services:
       retries: 20
 
   # Reverse proxy for LIVE user apps. :9080 is HTTP, :9443 is HTTPS
-  # (Caddy tls internal). Admin :2019 is loopback-only so a LAN client
-  # cannot rewrite routes. extra_hosts lets Caddy reach app ports
-  # published on the Windows/macOS Docker host.
+  # (Caddy tls internal for *.localhost). Admin :2019 is loopback-only
+  # so a LAN client cannot rewrite routes. extra_hosts lets Caddy reach
+  # app ports published on the Windows/macOS Docker host.
+  # /data persists ACME certificates across container recreate. Custom
+  # domains (Phase 7.6) still need :80/:443 reachable at the hostname
+  # to complete HTTP-01 — default publishes stay loopback.
   caddy:
     image: caddy:2-alpine
     ports:
@@ -57,8 +60,12 @@ services:
       - "127.0.0.1:2019:2019"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - forge_caddy_data:/data
+      - forge_caddy_config:/config
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
 volumes:
   forge_postgres_data:
+  forge_caddy_data:
+  forge_caddy_config:

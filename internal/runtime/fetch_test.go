@@ -49,6 +49,35 @@ func TestHostFetcherRejectsUserinfo(t *testing.T) {
 	}
 }
 
+func TestGitAskedForCredentials(t *testing.T) {
+	if !gitAskedForCredentials("fatal: could not read Username for 'https://github.com': terminal prompts disabled") {
+		t.Fatal("username prompt")
+	}
+	if !gitAskedForCredentials("fatal: could not read Password for 'https://github.com': terminal prompts disabled") {
+		t.Fatal("password prompt")
+	}
+	if gitAskedForCredentials("fatal: repository not found") {
+		t.Fatal("missing repo is not a credential prompt")
+	}
+}
+
+func TestHostFetcherFetchRefRejectsUserinfo(t *testing.T) {
+	err := (HostFetcher{}).FetchRef(context.Background(), "https://user:token@example.com/repo.git", t.TempDir(), "abc1234", "gho_x")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestHostFetcherFetchRefCopiesHello(t *testing.T) {
+	dest := t.TempDir()
+	if err := (HostFetcher{}).FetchRef(context.Background(), store.SampleHelloURL, dest, "abc1234", "gho_x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "server.py")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHostFetcherRejectsLoopback(t *testing.T) {
 	err := (HostFetcher{}).Fetch(context.Background(), "https://127.0.0.1/repo.git", t.TempDir())
 	if err == nil {

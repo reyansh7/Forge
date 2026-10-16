@@ -33,9 +33,19 @@ var reservedLocalHosts = map[string]struct{}{
 	"admin":     {},
 	"api":       {},
 	"caddy":     {},
+	"cdn":       {},
+	"console":   {},
+	"dashboard": {},
 	"docker":    {},
 	"forge":     {},
+	"git":       {},
+	"hooks":     {},
 	"localhost": {},
+	"login":     {},
+	"mail":      {},
+	"observe":   {},
+	"ssh":       {},
+	"status":    {},
 	"www":       {},
 }
 
@@ -110,6 +120,11 @@ func ValidateLocalHost(raw string) (string, error) {
 	}
 	if _, reserved := reservedLocalHosts[s]; reserved {
 		return "", fmt.Errorf("local_host %q is reserved", s)
+	}
+	// Preview Hosts are {slug}-preview.localhost. An operator slug
+	// with that suffix would steal another app's preview matcher.
+	if strings.HasSuffix(s, previewHostSuffix) {
+		return "", fmt.Errorf("local_host must not end with %s", previewHostSuffix)
 	}
 	return s, nil
 }
@@ -198,6 +213,36 @@ func ValidateApplication(name, repositoryURL, rootDirectory, healthPath, localHo
 	in.HealthPath = health
 	in.LocalHost = host
 	return in, nil
+}
+
+// ValidateBuildPackage accepts the Go package a deploy should compile
+// from the module root. Empty and "." mean "let detect choose".
+// ./cmd/<name> is the only other form: it cannot point outside the
+// module, and it is not a shell command.
+func ValidateBuildPackage(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" || s == "." {
+		return s, nil
+	}
+	name, ok := strings.CutPrefix(s, "./cmd/")
+	if !ok || strings.Contains(name, "/") || !buildPackageName(name) {
+		return "", fmt.Errorf("build_package must be empty, ., or ./cmd/<name>")
+	}
+	return "./cmd/" + name, nil
+}
+
+func buildPackageName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // SanitizeBuildLog caps docker build output for Postgres and the UI.

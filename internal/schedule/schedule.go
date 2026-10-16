@@ -19,6 +19,7 @@ package schedule
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/reyansh7/Forge/internal/config"
 	"github.com/reyansh7/Forge/internal/store"
@@ -53,6 +54,17 @@ func (s *Scheduler) cap() int {
 // RPUSH onto that node's list. Otherwise a restarting worker cannot
 // abandon only its own interrupted rows.
 func (s *Scheduler) Place(ctx context.Context) (store.Node, error) {
+	return s.PlacePrefer(ctx, "")
+}
+
+// PlacePrefer is Place with a volume-affinity hint.
+//
+// Docker named volumes live on the node that created them. If an
+// application has volumes, HTTP passes the last node_id so the next
+// deploy can see the same disk. If that node is dead or at cap, we
+// fall back to least-loaded — the new node gets an empty volume.
+// That is not live migrate; it is documented data locality.
+func (s *Scheduler) PlacePrefer(ctx context.Context, preferNodeID string) (store.Node, error) {
 	if s == nil || s.Nodes == nil {
 		return store.Node{}, ErrNoCapacity
 	}
@@ -61,11 +73,15 @@ func (s *Scheduler) Place(ctx context.Context) (store.Node, error) {
 		return store.Node{}, err
 	}
 	limit := s.cap()
+	preferNodeID = strings.TrimSpace(preferNodeID)
 	var best *store.Node
 	for i := range ready {
 		n := ready[i]
 		if n.InProgress >= limit {
 			continue
+		}
+		if preferNodeID != "" && n.ID == preferNodeID {
+			return n, nil
 		}
 		if best == nil || n.InProgress < best.InProgress {
 			cp := n

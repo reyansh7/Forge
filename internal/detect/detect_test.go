@@ -27,6 +27,7 @@ func TestTreePrefersDockerfile(t *testing.T) {
 func TestTreeDetectsGoWithoutDockerfile(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "go.mod"), "module example\nrequire github.com/gin-gonic/gin v1.9.0\n")
+	write(t, filepath.Join(dir, "main.go"), "package main\nfunc main() {}\n")
 	got, err := Tree(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -37,11 +38,68 @@ func TestTreeDetectsGoWithoutDockerfile(t *testing.T) {
 	if got.Framework != "gin" {
 		t.Fatalf("framework = %q", got.Framework)
 	}
-	if !strings.Contains(got.GeneratedDockerfile, "go build") {
-		t.Fatal("missing go build recipe")
+	if !strings.Contains(got.GeneratedDockerfile, "go build -o /app/app .") {
+		t.Fatal(got.GeneratedDockerfile)
 	}
 	if got.ListenPort() != DefaultPort || got.PortSource != "pack" {
 		t.Fatalf("port %+v", got)
+	}
+}
+
+func TestTreeGoBuildsSingleCmd(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module example\n")
+	write(t, filepath.Join(dir, "cmd", "api", "main.go"), "package main\nfunc main() {}\n")
+	got, err := Tree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.GeneratedDockerfile, "go build -o /app/app ./cmd/api") {
+		t.Fatal(got.GeneratedDockerfile)
+	}
+}
+
+func TestTreeGoPinnedPackageBuildsOneCommand(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module example\n")
+	write(t, filepath.Join(dir, "cmd", "api", "main.go"), "package main\nfunc main() {}\n")
+	write(t, filepath.Join(dir, "cmd", "worker", "main.go"), "package main\nfunc main() {}\n")
+	write(t, filepath.Join(dir, ".forge-build-package"), "./cmd/api\n")
+	got, err := Tree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.GeneratedDockerfile, "go build -o /app/app ./cmd/api") {
+		t.Fatal(got.GeneratedDockerfile)
+	}
+	if strings.Contains(got.GeneratedDockerfile, "./cmd/worker") {
+		t.Fatal(got.GeneratedDockerfile)
+	}
+}
+
+func TestTreeDockerfileWinsOverPinnedGoPackage(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\nEXPOSE 8080\n")
+	write(t, filepath.Join(dir, "go.mod"), "module example\n")
+	write(t, filepath.Join(dir, "cmd", "api", "main.go"), "package main\nfunc main() {}\n")
+	write(t, filepath.Join(dir, ".forge-build-package"), "./cmd/api\n")
+	got, err := Tree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != KindDockerfile {
+		t.Fatalf("kind = %s", got.Kind)
+	}
+}
+
+func TestTreeGoRefusesSeveralMains(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module example\n")
+	write(t, filepath.Join(dir, "cmd", "api", "main.go"), "package main\nfunc main() {}\n")
+	write(t, filepath.Join(dir, "cmd", "worker", "main.go"), "package main\nfunc main() {}\n")
+	_, err := Tree(dir)
+	if err == nil || !strings.Contains(err.Error(), "./cmd/api") || !strings.Contains(err.Error(), "./cmd/worker") {
+		t.Fatal(err)
 	}
 }
 
@@ -239,6 +297,7 @@ func TestTreeUnknownRepository(t *testing.T) {
 func TestTreeIgnoresAssetsWhenClassifying(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "go.mod"), "module example\n")
+	write(t, filepath.Join(dir, "main.go"), "package main\nfunc main() {}\n")
 	write(t, filepath.Join(dir, "logo.png"), "not-a-png")
 	write(t, filepath.Join(dir, "demo.mp4"), "not-a-video")
 	write(t, filepath.Join(dir, "Brand.woff2"), "font")
@@ -271,6 +330,7 @@ func TestTreeRejectsEmptyTree(t *testing.T) {
 func TestTreeMultipleManifestsPrefersGoOverNode(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "go.mod"), "module example\n")
+	write(t, filepath.Join(dir, "main.go"), "package main\nfunc main() {}\n")
 	write(t, filepath.Join(dir, "package.json"), `{"name":"web"}`)
 	got, err := Tree(dir)
 	if err != nil {
@@ -413,6 +473,9 @@ func TestListenPortDefault(t *testing.T) {
 
 func write(t *testing.T, path, body string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

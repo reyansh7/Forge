@@ -76,15 +76,35 @@ func TestLoadRejectsUnspecifiedBind(t *testing.T) {
 
 func TestLoadAllowsPublicBindWhenFlagged(t *testing.T) {
 	t.Setenv("FORGE_API_ADDR", "0.0.0.0:8080")
-	t.Setenv("FORGE_DATABASE_URL", "postgres://example")
+	t.Setenv("FORGE_DATABASE_URL", "postgres://forge:not-the-default@127.0.0.1:15432/forge")
 	t.Setenv("FORGE_REDIS_URL", "redis://example")
 	t.Setenv("FORGE_ALLOW_PUBLIC_BIND", "1")
+	t.Setenv("FORGE_TLS_CERT_FILE", "cert.pem")
+	t.Setenv("FORGE_TLS_KEY_FILE", "key.pem")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cfg.AllowPublicBind {
 		t.Fatal("expected AllowPublicBind")
+	}
+}
+
+func TestLoadPublicBindRequiresTLSAndPassword(t *testing.T) {
+	t.Setenv("FORGE_API_ADDR", "0.0.0.0:8080")
+	t.Setenv("FORGE_DATABASE_URL", "postgres://forge:forge@127.0.0.1:15432/forge")
+	t.Setenv("FORGE_REDIS_URL", "redis://example")
+	t.Setenv("FORGE_ALLOW_PUBLIC_BIND", "1")
+	t.Setenv("FORGE_TLS_CERT_FILE", "cert.pem")
+	t.Setenv("FORGE_TLS_KEY_FILE", "key.pem")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for the default postgres password")
+	}
+	t.Setenv("FORGE_DATABASE_URL", "postgres://forge:not-the-default@127.0.0.1:15432/forge")
+	t.Setenv("FORGE_TLS_CERT_FILE", "")
+	t.Setenv("FORGE_TLS_KEY_FILE", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when public bind has no TLS")
 	}
 }
 
@@ -110,5 +130,53 @@ func TestLoadHonorsAddrOverride(t *testing.T) {
 	}
 	if cfg.Addr != "127.0.0.1:9090" {
 		t.Fatalf("Addr = %q", cfg.Addr)
+	}
+}
+
+func TestLoadGitHubDefaultsOff(t *testing.T) {
+	t.Setenv("FORGE_API_ADDR", "127.0.0.1:8080")
+	t.Setenv("FORGE_DATABASE_URL", "postgres://example")
+	t.Setenv("FORGE_REDIS_URL", "redis://example")
+	t.Setenv("FORGE_GITHUB_CLIENT_ID", "")
+	t.Setenv("FORGE_GITHUB_CLIENT_SECRET", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubConfigured() {
+		t.Fatal("empty credentials must disable oauth")
+	}
+	if cfg.PublicBase != "http://127.0.0.1:3000" || cfg.WebhookBase != "http://127.0.0.1:8080" {
+		t.Fatalf("bases %+v", cfg)
+	}
+	t.Setenv("FORGE_GITHUB_CLIENT_ID", "iv")
+	t.Setenv("FORGE_GITHUB_CLIENT_SECRET", "sec")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.GitHubConfigured() {
+		t.Fatal("expected configured")
+	}
+}
+
+func TestGitHubAllowlistRejectsNames(t *testing.T) {
+	t.Setenv("FORGE_DATABASE_URL", "postgres://forge:forge@127.0.0.1:5432/forge?sslmode=disable")
+	t.Setenv("FORGE_REDIS_URL", "redis://127.0.0.1:6379/0")
+	t.Setenv("FORGE_GITHUB_ALLOWED_USER_IDS", "octocat")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected a numeric user id")
+	}
+	t.Setenv("FORGE_GITHUB_ALLOWED_USER_IDS", "42, 42")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.GitHubUserAllowed(42) || cfg.GitHubUserAllowed(7) {
+		t.Fatalf("allowlist %+v", cfg.GitHubAllowedUserIDs)
+	}
+	t.Setenv("FORGE_APPS_DOMAIN", "*.forge.com")
+	if _, err := Load(); err == nil {
+		t.Fatal("wildcard apps domain")
 	}
 }

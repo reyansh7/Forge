@@ -29,8 +29,8 @@ func TestMigrationFileNamesAreVersioned(t *testing.T) {
 	if len(names) < 5 || names[4] != "0005_application_settings.sql" {
 		t.Fatalf("fifth migration = %v, want 0005_application_settings.sql", names)
 	}
-	if len(names) < 8 || names[5] != "0006_identity.sql" || names[6] != "0007_runtime_metadata.sql" || names[7] != "0008_nodes.sql" {
-		t.Fatalf("migrations = %v, want …0006_identity.sql, 0007_runtime_metadata.sql, 0008_nodes.sql", names)
+	if len(names) < 12 || names[5] != "0006_identity.sql" || names[6] != "0007_runtime_metadata.sql" || names[7] != "0008_nodes.sql" || names[8] != "0009_application_links.sql" || names[9] != "0010_application_volumes.sql" || names[10] != "0011_deployment_environment.sql" || names[11] != "0012_application_domains.sql" {
+		t.Fatalf("migrations = %v, want …0012_application_domains.sql", names)
 	}
 }
 

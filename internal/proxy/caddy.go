@@ -33,6 +33,23 @@ type Caddy struct {
 	AdminURL     string
 	UpstreamHost string
 	Client       *http.Client
+	// Domains is optional. When set, Apply includes verified custom
+	// hostnames so Caddy can obtain ACME certs. Tests leave it nil.
+	Domains DomainSource
+	// AppsDomain enables routing of origin=platform rows. Empty skips
+	// them so a local worker does not ask Let's Encrypt for names that
+	// do not resolve here.
+	AppsDomain string
+	// ControlHost is the dashboard site (only emitted with AppsDomain).
+	// ControlUpstream is host:port inside the Caddy network, usually
+	// host.docker.internal:3000. It is not an application container.
+	ControlHost     string
+	ControlUpstream string
+}
+
+// DomainSource is the Caddy → application_domains boundary.
+type DomainSource interface {
+	ListActiveDomains(ctx context.Context) ([]store.ApplicationDomain, error)
 }
 
 func (c Caddy) client() *http.Client {
@@ -43,7 +60,18 @@ func (c Caddy) client() *http.Client {
 }
 
 func (c Caddy) Apply(ctx context.Context, live []store.Deployment) error {
-	body := RenderCaddyfile(c.UpstreamHost, live)
+	var domains []store.ApplicationDomain
+	if c.Domains != nil {
+		var err error
+		domains, err = c.Domains.ListActiveDomains(ctx)
+		if err != nil {
+			return fmt.Errorf("caddy domains: %w", err)
+		}
+	}
+	body := RenderCaddyfile(c.UpstreamHost, live, routableDomains(domains, c.AppsDomain))
+	if site := controlPlaneSite(c.AppsDomain, c.ControlHost, c.ControlUpstream); site != "" {
+		body = append(body, []byte(site)...)
+	}
 	admin, err := url.JoinPath(strings.TrimRight(c.AdminURL, "/"), "load")
 	if err != nil {
 		return fmt.Errorf("caddy admin url: %w", err)
@@ -69,14 +97,23 @@ func (c Caddy) Apply(ctx context.Context, live []store.Deployment) error {
 
 // RenderCaddyfile is deterministic so tests can lock the contract.
 // Deployment IDs must already be UUIDs; ports must be in range.
-func RenderCaddyfile(upstreamHost string, live []store.Deployment) []byte {
+//
+// .localhost and /d/{id}/ stay on the catch-all :80 / :443 listeners
+// with `tls internal` and `auto_https off` so loopback never hits
+// Let's Encrypt. Verified custom domains are separate site blocks
+// with `tls { issuer acme }` so Caddy obtains and renews certificates
+// for those hostnames only. Pending domains are not passed in.
+func RenderCaddyfile(upstreamHost string, live []store.Deployment, domains ...[]store.ApplicationDomain) []byte {
 	if strings.TrimSpace(upstreamHost) == "" {
 		upstreamHost = "host.docker.internal"
 	}
+	var extra []store.ApplicationDomain
+	if len(domains) > 0 {
+		extra = domains[0]
+	}
 	var b bytes.Buffer
-	// auto_https off: we do not want ACME on loopback. :443 uses
-	// Caddy's local CA (`tls internal`). Public Let's Encrypt waits
-	// for a real hostname (Phase 7).
+	// auto_https off: ACME is per named site below, never for
+	// :80/:443 catch-alls or *.localhost.
 	b.WriteString("{\n\tadmin 0.0.0.0:2019\n\tauto_https off\n}\n\n")
 	b.WriteString(":80 {\n")
 	writeAppRoutes(&b, upstreamHost, live)
@@ -86,7 +123,93 @@ func RenderCaddyfile(upstreamHost string, live []store.Deployment) []byte {
 	writeAppRoutes(&b, upstreamHost, live)
 	b.WriteString("\trespond \"Forge proxy: no live deployment at this path\" 404\n")
 	b.WriteString("}\n")
+	writeCustomDomainSites(&b, upstreamHost, live, extra)
 	return b.Bytes()
+}
+
+// routableDomains drops platform hostnames unless the operator set
+// the apps zone. Custom domains are always routed: they were proved
+// with DNS TXT and already expect ACME.
+func routableDomains(domains []store.ApplicationDomain, appsDomain string) []store.ApplicationDomain {
+	if strings.TrimSpace(appsDomain) != "" {
+		return domains
+	}
+	out := make([]store.ApplicationDomain, 0, len(domains))
+	for _, d := range domains {
+		if d.Origin == store.DomainOriginPlatform {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// controlPlaneSite proxies the dashboard hostname to Next.js so GitHub
+// can POST webhooks at /forge-api without publishing the API port.
+// Both the zone and the host must be set; otherwise local Caddyfiles
+// stay exactly the catch-all they were.
+func controlPlaneSite(appsDomain, host, upstream string) string {
+	if strings.TrimSpace(appsDomain) == "" || strings.TrimSpace(host) == "" || strings.TrimSpace(upstream) == "" {
+		return ""
+	}
+	if _, err := store.ValidateHostname(host); err != nil {
+		return ""
+	}
+	if strings.ContainsAny(upstream, " \t\n;/{}") {
+		return ""
+	}
+	return "\nhttp://" + host + " {\n\treverse_proxy " + upstream + "\n}\n\nhttps://" + host + " {\n\ttls {\n\t\tissuer acme\n\t}\n\treverse_proxy " + upstream + "\n}\n"
+}
+
+func writeCustomDomainSites(b *bytes.Buffer, upstreamHost string, live []store.Deployment, domains []store.ApplicationDomain) {
+	if len(domains) == 0 {
+		return
+	}
+	index := map[string]store.Deployment{}
+	for _, d := range live {
+		if d.HostPort < 1 || d.HostPort > 65535 {
+			continue
+		}
+		if _, err := store.ParseUUID(d.ID); err != nil {
+			continue
+		}
+		env, err := store.ParseEnvironment(d.Environment)
+		if err != nil {
+			continue
+		}
+		index[d.ApplicationID+"|"+env] = d
+	}
+	for _, dom := range domains {
+		host, err := store.ValidateHostname(dom.Hostname)
+		if err != nil {
+			continue
+		}
+		if dom.Status != "" && dom.Status != store.DomainActive {
+			continue
+		}
+		env, err := store.ParseEnvironment(dom.Environment)
+		if err != nil {
+			continue
+		}
+		d, ok := index[dom.ApplicationID+"|"+env]
+		if !ok {
+			continue
+		}
+		upstream := net.JoinHostPort(deploymentUpstreamHost(upstreamHost, d), strconv.Itoa(d.HostPort))
+		// HTTP site is more specific than :80 so ACME HTTP-01 can
+		// answer on this hostname. HTTPS uses issuer acme (Let's
+		// Encrypt by default). Do not use on_demand: that would mint
+		// a cert for any Host header pointed at this process.
+		b.WriteString("\nhttp://")
+		b.WriteString(host)
+		b.WriteString(" {\n\treverse_proxy ")
+		b.WriteString(upstream)
+		b.WriteString("\n}\n\nhttps://")
+		b.WriteString(host)
+		b.WriteString(" {\n\ttls {\n\t\tissuer acme\n\t}\n\treverse_proxy ")
+		b.WriteString(upstream)
+		b.WriteString("\n}\n")
+	}
 }
 
 func writeAppRoutes(b *bytes.Buffer, upstreamHost string, live []store.Deployment) {
@@ -112,6 +235,16 @@ func writeAppRoutes(b *bytes.Buffer, upstreamHost string, live []store.Deploymen
 		slug := localHostSlug(d.LocalHost)
 		if slug == "" {
 			slug = slugFromPublicURL(d.PublicURL)
+		}
+		// Preview Hosts are {slug}-preview. Production keeps {slug}.
+		// Do not recover preview from PublicURL then suffix again —
+		// RouteLocalHost is idempotent for an already-suffixed slug.
+		if env, err := store.ParseEnvironment(d.Environment); err == nil && env == store.EnvPreview {
+			if prod := localHostSlug(d.LocalHost); prod != "" {
+				slug = store.PreviewLocalHost(prod)
+			} else if slug != "" && !strings.HasSuffix(slug, "-preview") {
+				slug = store.PreviewLocalHost(slug)
+			}
 		}
 		if slug != "" {
 			b.WriteString("\t@host_")

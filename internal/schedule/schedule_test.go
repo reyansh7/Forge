@@ -53,6 +53,39 @@ func TestPlaceNoReady(t *testing.T) {
 	}
 }
 
+func TestPlacePreferUsesReadyHint(t *testing.T) {
+	s := Scheduler{
+		Nodes: fakeNodes{ready: []store.Node{
+			{ID: "a", Name: "local", InProgress: 0},
+			{ID: "b", Name: "lab2", InProgress: 0},
+		}},
+		MaxInflight: 4,
+	}
+	got, err := s.PlacePrefer(context.Background(), "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "b" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestPlacePreferFallsBackWhenHintDead(t *testing.T) {
+	s := Scheduler{
+		Nodes: fakeNodes{ready: []store.Node{
+			{ID: "a", Name: "local", InProgress: 0},
+		}},
+		MaxInflight: 4,
+	}
+	got, err := s.PlacePrefer(context.Background(), "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "a" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestPlacePropagatesStoreError(t *testing.T) {
 	want := errors.New("db down")
 	s := Scheduler{Nodes: fakeNodes{err: want}}
