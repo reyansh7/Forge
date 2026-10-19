@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/reyansh7/Forge/internal/detect"
 	"github.com/reyansh7/Forge/internal/githubapi"
 	"github.com/reyansh7/Forge/internal/store"
 )
@@ -558,6 +559,79 @@ func TestForgeUsernameFromGitHub(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func TestWebhookPushDeploysEveryServiceOnce(t *testing.T) {
+	srv, gh, app := githubAppFixture(t)
+	jobs := &recJobs{}
+	srv.Jobs = jobs
+	srv.ProjectDeploys = newMemProjectDeploys()
+	srv.Discoverer = func(context.Context, store.Project) ([]detect.Service, error) {
+		return []detect.Service{
+			{Name: "ml-model", Root: "ml-model", Kind: "python", Port: 8000, Deployable: true, Public: boolPtr(false)},
+			{Name: "backend", Root: "backend", Kind: "python", Framework: "fastapi", Port: 8080, Deployable: true, Public: boolPtr(true), DependsOn: []string{"ml-model"}},
+			{Name: "frontend", Root: "frontend", Kind: "node", Framework: "next", Port: 3000, Deployable: true, Public: boolPtr(true), DependsOn: []string{"backend"}},
+		}, nil
+	}
+	_, _ = gh.UpsertApplicationGitHub(context.Background(), store.ApplicationGitHub{
+		ApplicationID: app.ID,
+		OwnerID:       testUserID,
+		RepoFullName:  "octo/hello",
+		Branch:        "main",
+		Environment:   store.EnvProduction,
+		WebhookSecret: "hook-secret",
+	})
+	push := func(delivery, sha string) *httptest.ResponseRecorder {
+		body := []byte(`{"ref":"refs/heads/main","after":"` + sha + `","repository":{"full_name":"octo/hello"},"head_commit":{"id":"` + sha + `","message":"ship","author":{"name":"Ada"}}}`)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/github/"+app.ID, bytes.NewReader(body))
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("X-GitHub-Delivery", delivery)
+		req.Header.Set("X-Hub-Signature-256", signBody("hook-secret", body))
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	first := push("55555555-5555-4555-8555-555555555555", "abc1234dead")
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first %d %s", first.Code, first.Body.String())
+	}
+	var view projectDeployResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Services) != 3 || len(jobs.jobs) != 3 {
+		t.Fatalf("services %d jobs %d body %s", len(view.Services), len(jobs.jobs), first.Body.String())
+	}
+	if view.Services[0].Name != "ml-model" || view.Services[2].Name != "frontend" {
+		t.Fatalf("order %+v", view.Services)
+	}
+	dup := push("55555555-5555-4555-8555-555555555555", "abc1234dead")
+	if dup.Code != http.StatusOK || !strings.Contains(dup.Body.String(), "duplicate") || len(jobs.jobs) != 3 {
+		t.Fatalf("dup %d jobs %d %s", dup.Code, len(jobs.jobs), dup.Body.String())
+	}
+	deps := srv.Deployments.(*memDeployments)
+	deps.mu.Lock()
+	for id, d := range deps.byID {
+		if d.CommitSHA != "abc1234dead" {
+			t.Errorf("commit %s", d.CommitSHA)
+		}
+		d.Status = store.StatusLive
+		deps.byID[id] = d
+	}
+	deps.mu.Unlock()
+	second := push("66666666-6666-4666-8666-666666666666", "def5678beef")
+	if second.Code != http.StatusAccepted || len(jobs.jobs) != 6 {
+		t.Fatalf("second %d jobs %d %s", second.Code, len(jobs.jobs), second.Body.String())
+	}
+	var again projectDeployResponse
+	if err := json.Unmarshal(second.Body.Bytes(), &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.ID == view.ID || len(again.Services) != 3 {
+		t.Fatalf("second release %+v", again)
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
 
 func TestManualDeployStillWorks(t *testing.T) {
 	srv, _, app := githubAppFixture(t)

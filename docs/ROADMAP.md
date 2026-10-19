@@ -38,7 +38,7 @@ Future-phase work must not be implemented merely because it is known to be requi
 
 | Kind | Phases | Meaning |
 |------|--------|---------|
-| **CURRENT** | 0, 1, 2, 3, 4, 5, 6, 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8, 7.9, 7.10, 7.11 | Implemented through Phase 6 plus Phase 7 increments 7.1–7.11 (service links, volumes, preview/production, rolling deploy, env-isolated volumes, custom domains + ACME, GitHub OAuth + webhooks + auto deploy, deployment lease and recovery sweep, personal allowlist + platform hostnames, project Deploy All, workspace diagnostics). AWS apply is still operator work (`docs/AWS.md`). |
+| **CURRENT** | 0, 1, 2, 3, 4, 5, 6, 7.1–7.14 | Implemented through Phase 6 plus Phase 7 increments 7.1–7.14 (through project Deploy All, workspace diagnostics, nested service discovery, post-fetch Git metadata cleanup, and a content-addressed image index). AWS apply is still operator work (`docs/AWS.md`). |
 | **NEXT** | 7 (further increments) | Remaining Phase 7 items only after the developer names the increment (or `START PHASE 7` again with a pick). |
 | **FUTURE** | 8–10 | Documented sequence. Not authorized. |
 
@@ -54,7 +54,7 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 4 Observability             COMPLETE
 5 Production hardening      COMPLETE
 6 Multi-node infrastructure   COMPLETE
-7 Advanced platform          IN PROGRESS (7.1–7.11)
+7 Advanced platform          IN PROGRESS (7.1–7.14)
 8 Cloud / AWS readiness
 9 High availability / scaling
 10 Multi-region / operational intelligence
@@ -336,7 +336,7 @@ A second worker process (`FORGE_NODE_NAME` + join token) consumes `forge:jobs:{i
 
 ## 10. Phase 7 — Advanced Platform Capabilities
 
-**Status: IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.9 complete. 7.8 is the deployment lease and recovery sweep (`docs/DEPLOYMENT_RECOVERY.md`). 7.9 is the personal allowlist and `{slug}.{FORGE_APPS_DOMAIN}` hostnames. 7.10 is project Deploy All: one action queues the existing per-service jobs and holds previous containers until every required service is live. If a required service fails after another was promoted, compensation restores those services in reverse promotion order and records a failure when the previous container is gone, the database restore fails, or Caddy does not switch back. 7.11 is workspace-quota diagnostics and per-stage deploy timings. It does not raise the 256 MiB default. The operator backup drill is still required before any AWS claim. Do not implement the rest of the list until the developer picks the next increment.
+**Status: IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.14 are done (service links, volumes, preview/production, rolling, env-isolated volumes, custom domains + ACME, GitHub OAuth + webhooks + auto deploy, deployment lease and recovery sweep, personal allowlist and platform hostnames, project Deploy All, workspace diagnostics and stage timings, nested service discovery, post-fetch Git metadata cleanup, content-addressed image reuse). Nested discovery opens one additional directory level when the parent directory is not itself a service. A third level is not discovered. Nested service discovery is not build caching. After fetch, the worker removes `.git` before the workspace quota. The quota value is unchanged, application files are kept, and a cleanup failure stops the deploy before build. That cleanup does not shrink the Git download. Cron, team RBAC, canary, managed application datastores, build cache, and hooks are not implemented. The Postgres backup drill is not complete. AWS is documented in `docs/AWS.md` and has not been applied. Do not implement the rest of the list until the developer picks the next increment.
 
 ### Objective
 
@@ -384,9 +384,13 @@ A worker lease and an API/worker sweeper. Lost queued messages and expired lease
 
 GitHub login and GitHub connect require `FORGE_GITHUB_ALLOWED_USER_IDS` (numeric GitHub user ids). An empty list refuses both. Webhook trust stays the HMAC check. When `FORGE_APPS_DOMAIN` is set, Forge reserves `https://{slug}.{zone}/` as an active `application_domains` row with `origin=platform` (migration 0017). Those names skip the TXT challenge. Custom domains under that zone are rejected. Caddy routes platform hosts and an optional `FORGE_CONTROL_HOST` (dashboard + `/forge-api` webhooks) only when the zone is set, reusing the 7.6 per-hostname ACME issuer. Local Compose stays on loopback. `deploy/aws/` and `docs/AWS.md` are the single-host install package (public 80/443 only). Not DNS-01, not a wildcard certificate, not an applied AWS account.
 
-### Increment 7.10 — project Deploy All (partial)
+### Increment 7.10 — project Deploy All
 
-`POST /projects/{id}/deploy` snapshots `detect.Discover`, ensures one application per selected service (Go `build_package` such as `./cmd/api` stays at the module root), creates a `project_deployments` saga (migration 0019), and queues the existing per-application deploy jobs. Independent services may build together up to `FORGE_MAX_INFLIGHT_PER_NODE`. A service waits until a lower-ranked dependency is live or failed. Obvious one-frontend/one-backend and one-backend/one-ML pairs become service links. Backends, workers, and ML services stay off Caddy unless `local_host` is set; they join a per-project Docker bridge (`forgep-` plus the project id). Link env keys are unchanged. A private target's value is its bridge URL. A public target keeps the Caddy URL.
+`POST /projects/{id}/deploy` snapshots `detect.Discover`, ensures one application per selected service (Go `build_package` such as `./cmd/api` stays at the module root), creates a `project_deployments` saga (migration 0019), and queues the existing per-application deploy jobs. A root `forge.yaml` replaces heuristic discovery. A production `docker-compose.yml` with more than one service and no root `Dockerfile` does not deploy the root or the child directories under different names. Detection names the Compose services, omits `docker-compose.dev.yml`, and does not print environment values. Prebuilt images are not pulled and their volumes are not created or deleted. A root `Dockerfile` stays on the single-application path. It may set service names, roots, ports, health paths, `public`, `depends_on`, generated env references, and named volumes. A cycle or a path that leaves the repository is rejected. When the file is absent, one frontend and one backend still get a browser key plus `CORS_ORIGIN`, and one backend and one ML service get `ML_SERVICE_URL`. Explicit env refs are not mixed with those guesses. `applications.exposure` (migration 0022) is `public`, `private`, or empty. Empty keeps the role default. Private stays off Caddy even if the name looks like a frontend. Public is routed even if the name looks like ML.
+
+A matching GitHub push that discovers more than one deployable service queues that same project deployment once, with the push commit on every child. A second delivery id does the same after the previous attempt has finished. The same delivery id does not create a second release. A repository with fewer than two deployable services keeps the single-application webhook. An invalid manifest is acknowledged and not retried by GitHub. The worker loads `depends_on` from the saga plan. A failed dependency is not fetched or built. The recovery sweeper marks the project deployment failed when it fail-closes an abandoned child, so a dead worker does not leave the saga on `deploying`. `POST /projects/{id}/deploys/{deployId}/rollback` queues image rollbacks for every service in that release. Unchanged services are still queued; Docker may reuse layers because `docker build` does not pass `--no-cache`. That is not a Forge build-cache product. A public build value change changes `.env.production.local`, so that frontend layer is not reused.
+
+Independent services may build together up to `FORGE_MAX_INFLIGHT_PER_NODE`. Services join a per-project Docker bridge (`forgep-` plus the project id). A private target's value is its bridge URL. A public target and every browser build key use the Caddy URL with one trailing slash. `CORS_ORIGIN` drops the path.
 
 The previous container is kept until every required service is live (migration 0020). If a required service fails after another was promoted, compensation restores the previous release in reverse promotion order and records a failure when the previous container is gone, the database restore fails, or Caddy does not switch back. That does not reverse database migrations or delete volumes. A Go build error that names exactly one `./cmd/<name>` is repaired by setting `build_package` and rebuilding once. Two commands are not guessed. An unhealthy release is not promoted.
 
@@ -394,16 +398,35 @@ The previous container is kept until every required service is live (migration 0
 
 Authorized in chat as the measurement increment after 7.10. A fetched tree that exceeds `FORGE_WORKSPACE_MAX_BYTES` (default `256 << 20`, 256 MiB) fails before build with the configured limit, the measured regular-file total, and the largest few relative paths. Symlinks are not followed. The error is the application quota, not a full host disk. The worker logs `deploy measurements` with fetch, detect, build, container-start, health, and total durations. Stages that did not run are `unavailable`, not 0. `transferred_bytes` is always `unavailable` because shallow `git clone` does not report wire size. `workspace_bytes` is the extracted regular-file sum when the walk finishes. No migration. The default cap is unchanged. Not BuildKit, not archive fetch, not a larger quota.
 
+### Increment 7.12 — nested service discovery (COMPLETE)
+
+`detect.Discover` still classifies the root and each child. A child with no service marker is opened once more, so `apps/web` and `services/api` become services. A directory that already matched is not opened, so `frontend/src` is not a second application. `group/team/web` is still not discovered. A Go `cmd/<name>` inside a nested module keeps the module path in the service name (`services/api/worker`) and the module directory as `root_directory`. The GitHub plan snapshot already saved manifests two levels down; it now also opens `cmd/` at that depth so the plan sees `main.go`. Saga compensation, the workspace quota, and fetch behavior are unchanged. Not a build cache. Not an editable plan.
+
+### Increment 7.13 — post-fetch Git metadata cleanup (COMPLETE)
+
+Authorized in chat after a shallow clone of a large repository failed the workspace quota while still in detecting. `git clone --depth 1` is unchanged, so the download size is unchanged. Once checkout is finished, the worker deletes the workspace `.git` directory or gitdir file before `checkWorkspaceSize`. A missing `.git` is success. A symlink named `.git` is unlinked and not followed. Application files are not deleted. If removal fails, the deployment fails in detecting and does not build. The quota limit is unchanged. An oversized working-tree file still fails the quota. Not a partial clone, not sparse checkout, and not build caching.
+
+Verified on the running worker on 16 October 2026. Deployment `ce25317c-aa5a-40bc-a154-af496e6dfc8b` failed in detecting at 4,851,073,426 bytes, over the 4,294,967,296-byte cap, with `.git/objects/pack/pack-c1d7e42f57b648c6cfcb88d5098a2e9180558349.pack` (2,235,893,491 bytes) as the largest file. After the worker that contains this cleanup was running, one new production deploy of the same application, `e271b07c-8cf3-4388-8d5b-0fd45cbd05ed`, had no `.git` directory while status was `building` and did not fail the quota. That attempt later failed health check because the root `package.json` has no `start` script. Detection now fails that shape during detecting, before `docker build`, when the recipe would be `npm start`. The cap was not raised.
+
+Before `docker build`, Forge appends a `.dockerignore` block. `.git` is always excluded. `node_modules` and Python virtualenv/bytecode caches are excluded only when Forge generated the Dockerfile, because that recipe reinstalls them. A user Dockerfile does not gain those cache rules. Datasets, models, assets, and committed outputs such as `dist` and `.next` are not ignored. Deployment `5fd5071a-76b1-401c-9e52-7cf3c57215c4` logged `transferring context: 2.62GB 522.6s`; that transfer is the working tree after git removal, and the datasets in it stay. A comparable fixture of 256 KiB junk files plus the same datasets measured 1,840,000 bytes before the rules, 1,310,000 bytes with the Node rules, and 1,050,000 bytes with the Python rules. The failed images were not deleted.
+
+Generated recipes also exclude caches that recipe recreates: Rust `target`, Java `target` and `.gradle`, and .NET `bin` and `obj`. Go `vendor` and the directory name `build` stay. `deploy measurements` adds `context_bytes` when the Docker log reports a transfer and `image_bytes` when `docker image inspect` returns a size. Both stay `unavailable` when the number was not reported. `transferred_bytes` is still `unavailable`. A checkout that declares Git submodules or a Git LFS filter fails in fetch instead of building empty directories or pointer files. Forge does not fetch those URLs and does not upload assets to an external store. `docker build` does not pass `--no-cache`, so on a cache miss the local builder can still reuse layers. That layer cache is not the 7.14 image index. The quota was not raised and the failed images were not deleted.
+
+### Increment 7.14 — content-addressed image reuse (COMPLETE)
+
+Authorized in chat as the build-cache increment, scoped to the poisoning boundary. After a successful `docker build`, the worker inspects the image ID and inserts one `build_cache` row (migration 0023) keyed by a sha256 of the confined build directory plus the sorted public build env (`NEXT_PUBLIC_`, `VITE_`, `REACT_APP_`). The git commit is not the key. Runtime secrets are not hashed and are not stored. A later deploy with the same key retags that image onto the new deployment and skips `docker build`. Reuse requires `docker image inspect` to still return the recorded ID. A missing or replaced image drops the index row and builds. A failed build is not indexed. `ON CONFLICT DO NOTHING` keeps the first validated image when two builds race. Prune deletes index rows beyond the newest eight only when no deployment of that application still names the image. Prune does not delete Docker images, volumes, or deployment rows. `FORGE_BUILD_CACHE=off` skips the index. A hit is not a health result: the container still starts and the health check still gates cutover. `deploy measurements` adds `build_cache=hit|miss|bypass`. The deployment log shows the same word, and the dashboard repeats it.
+
+Not implemented in this increment: a shared npm/pip/Go module cache, a Git object mirror, BuildKit cache mounts, resuming a failed deploy from a mid-build checkpoint, and recursive discovery past the 7.12 depth. A shared package cache is the poisoning case this increment refuses. Docker layer reuse on a miss remains the builder's own cache because `--no-cache` is still not passed.
+
 ### Remaining capabilities (do not implement the list at once)
 
 - Zero-downtime **canary** (weighted split) **on top of rolling + rollback**
 - Scheduled jobs
 - Managed-style databases/Redis for **apps** (not replacing control-plane Postgres/Redis)
 - Team permissions (beyond single-operator auth)
-- Build caching with cache poisoning treated as a security issue
 - Extensibility hooks (detect/notify) without host exec
 
-**Already exists (do not re-list as greenfield):** image rollback, HTTP health gate, env vars, log snapshots, `.localhost` DX, same-project service links (7.1), persistent named volumes (7.2), preview vs production (7.3), rolling cutover (7.4), environment-isolated volume mounts (7.5), custom domains + Caddy ACME (7.6), GitHub OAuth + auto deploy (7.7), deployment lease and recovery sweep (7.8), personal GitHub allowlist and platform hostnames (7.9), project Deploy All with reverse-order compensation (7.10), workspace-quota diagnostics and stage timings (7.11).
+**Already exists (do not re-list as greenfield):** image rollback, HTTP health gate, env vars, log snapshots, `.localhost` DX, same-project service links (7.1), persistent named volumes (7.2), preview vs production (7.3), rolling cutover (7.4), environment-isolated volume mounts (7.5), custom domains + Caddy ACME (7.6), GitHub OAuth + auto deploy (7.7), deployment lease and recovery sweep (7.8), personal GitHub allowlist and platform hostnames (7.9), project Deploy All with reverse-order compensation (7.10), workspace-quota diagnostics and stage timings (7.11), nested service discovery (7.12), post-fetch Git metadata cleanup (7.13).
 
 **Not in this phase:** billing as a reason to weaken isolation; AWS account creation.
 
@@ -541,7 +564,7 @@ Before moving forward:
 
 **Phase 6 — COMPLETE** (authorized `START PHASE 6`)
 
-**Phase 7 — IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.11 done (service links, volumes, preview/production, rolling, env-isolated volumes, custom domains + ACME, GitHub OAuth + webhooks + auto deploy, deployment lease and recovery sweep, personal allowlist and platform hostnames, project Deploy All, workspace diagnostics and stage timings). Cron, team RBAC, canary, managed app datastores, build cache, and hooks are not implemented. The Postgres backup drill is not marked done. AWS is documented in `docs/AWS.md` and is not applied.
+**Phase 7 — IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.14 are done. The status paragraph in section 10 is authoritative.
 
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
@@ -581,9 +604,15 @@ Phase 7.7 (done): GitHub OAuth connect/disconnect; repo+branch binding; HMAC web
 
 Phase 7.8 (done): `lease_until` and `recovery_count`; worker renews the lease; API and worker sweep expired leases and queued rows whose message was never taken. Early stages re-queue at most twice. Later stages fail closed without replacing the previous live row. Not AWS, not a durable Redis, not HA.
 
-Phase 7.9 and 7.10 (done): personal allowlist, platform hostnames, and project Deploy All with reverse-order compensation. The full write-up is in section 10.
+Phase 7.9 and 7.10 (done): personal allowlist, platform hostnames, and project Deploy All. A root `forge.yaml` is the service plan. A Git push of a multi-service repository queues one project deployment for that commit. Private services stay off the public proxy unless `exposure` is `public`. The full write-up is in section 10. This does not deploy any particular repository and does not raise the workspace quota.
 
 Phase 7.11 (done): workspace quota failures name the limit, measured regular-file bytes, and the largest few relative paths. `deploy measurements` logs stage durations. `transferred_bytes` is `unavailable`. Default cap stays 256 MiB. Not build cache, not a larger quota.
+
+Phase 7.12 (done): discovery opens one extra directory when the parent is not a service. A third level is not discovered. Not a build cache.
+
+Phase 7.13 (done): after fetch, `.git` is removed before the workspace quota. The cap is unchanged. Application files stay. Cleanup failure stops the deploy before build. The Git download size is unchanged. Not build caching.
+
+Service-scoped fetch (done as a follow-up to 7.13, not a new phase): a `root_directory` other than `.` is cloned with `--filter=blob:none` and a cone sparse-checkout. Sparse checkout without the filter does not shrink the pack. Root `.` stays a full shallow clone. Git LFS and submodules still fail closed. Per-application memory, CPU, PID, and health-timeout settings default to the previous hardcoded values and reject anything outside the ceiling. The workspace quota is unchanged.
 
 ---
 

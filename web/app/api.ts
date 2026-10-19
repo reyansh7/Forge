@@ -14,6 +14,10 @@ export type Application = {
   root_directory: string;
   health_path: string;
   local_host: string;
+  memory_mb?: number;
+  cpu_millis?: number;
+  pids_limit?: number;
+  health_timeout_seconds?: number;
   platform_url?: string;
   created_at: string;
   updated_at: string;
@@ -231,7 +235,10 @@ export type ProjectDeployService = {
   port?: number;
   status: string;
   error?: string;
+  public_url?: string;
   internal_url?: string;
+  depends_on?: string[];
+  generated_env?: string[];
 };
 
 export type ProjectDeployLink = {
@@ -274,6 +281,12 @@ export function cancelProjectDeploy(projectId: string, deployId: string): Promis
   );
 }
 
+export function rollbackProjectDeploy(projectId: string, deployId: string): Promise<ProjectDeploy> {
+  return apiFetch(`/forge-api/projects/${projectId}/deploys/${deployId}/rollback`, { method: "POST" }).then((r) =>
+    parse<ProjectDeploy>(r),
+  );
+}
+
 export function getProject(id: string): Promise<Project> {
   return apiFetch(`/forge-api/projects/${id}`).then((r) => parse<Project>(r));
 }
@@ -306,6 +319,10 @@ export function updateApplication(
     root_directory: string;
     health_path: string;
     local_host: string;
+    memory_mb?: number;
+    cpu_millis?: number;
+    pids_limit?: number;
+    health_timeout_seconds?: number;
   },
 ): Promise<Application> {
   return apiFetch(`/forge-api/applications/${id}`, {
@@ -366,6 +383,7 @@ export function getDeployment(id: string): Promise<Deployment> {
 export type EnvTemplate = {
   path: string;
   directory: string;
+  source?: string;
   vars: { key: string; value: string }[];
 };
 

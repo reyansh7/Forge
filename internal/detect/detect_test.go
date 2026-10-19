@@ -105,7 +105,7 @@ func TestTreeGoRefusesSeveralMains(t *testing.T) {
 
 func TestTreeDetectsNodeWithoutDockerfile(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "package.json"), `{"name":"x"}`)
+	write(t, filepath.Join(dir, "package.json"), `{"scripts":{"start":"node server.js"}}`)
 	got, err := Tree(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -113,8 +113,8 @@ func TestTreeDetectsNodeWithoutDockerfile(t *testing.T) {
 	if got.Kind != KindNode {
 		t.Fatalf("kind = %q", got.Kind)
 	}
-	if got.GeneratedDockerfile != nodeGenericDockerfile {
-		t.Fatal("generic node recipe changed")
+	if !strings.Contains(got.GeneratedDockerfile, `CMD ["npm","start"]`) {
+		t.Fatal(got.GeneratedDockerfile)
 	}
 }
 

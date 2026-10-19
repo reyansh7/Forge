@@ -89,24 +89,36 @@ type Instance struct {
 // *inside* build and run, not as `sh -c` on the host.
 type HostDocker struct{}
 
-func (HostDocker) Build(ctx context.Context, dir, image, kind string, env []EnvPair) (string, error) {
+// StageBuildInputs writes the Dockerfile recipe and the public build
+// env file before a cache key is hashed or docker build runs. Build
+// calls it again; both writes are deterministic for the same inputs.
+func StageBuildInputs(dir, kind string, env []EnvPair) error {
 	if err := prepareDockerfile(dir, kind); err != nil {
+		return err
+	}
+	return writeProductionEnv(dir, PublicBuildEnv(env))
+}
+
+func (HostDocker) Build(ctx context.Context, dir, image, kind string, env []EnvPair) (string, error) {
+	if err := StageBuildInputs(dir, kind, env); err != nil {
 		return "", err
 	}
-	if err := writeProductionEnv(dir, env); err != nil {
-		return "", err
-	}
+	// Only browser-facing keys enter the image. A secret in the same
+	// env list is still passed to docker run and must not become a
+	// layer or a Next.js client bundle.
+	buildEnv := PublicBuildEnv(env)
 	if err := validateImageName(image); err != nil {
 		return "", err
 	}
 	args := []string{"build", "-t", image}
-	for _, ev := range env {
+	for _, ev := range buildEnv {
 		if err := validateEnvPair(ev); err != nil {
 			return "", err
 		}
 		// --build-arg is for operator Dockerfiles that declare ARG.
 		// Vite/CRA/Next read .env.production.local from the context
-		// (written above). Do not log these values.
+		// (written above). Changing the value changes that file, so
+		// the COPY layer cannot be reused. Do not log these values.
 		args = append(args, "--build-arg", ev.Key+"="+ev.Value)
 	}
 	args = append(args, "--", dir)
@@ -126,7 +138,65 @@ func (HostDocker) Build(ctx context.Context, dir, image, kind string, env []EnvP
 	return log, nil
 }
 
+// ImageBytes is the image's reported Size after a successful build.
+// A failure here is not a failed deploy: the caller logs the size as
+// unavailable and still runs the image. This does not delete images.
+// ImageID is the content ID from docker image inspect. Reuse compares
+// it to the ID stored when the image was built. A retagged or replaced
+// name with a different ID is not a cache hit.
+func (HostDocker) ImageID(ctx context.Context, image string) (string, error) {
+	if err := validateImageName(image); err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", "-f", "{{.Id}}", image)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("docker image inspect: %s", truncate(string(out), 200))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// Tag adds dest as another name for source. It does not delete source
+// and does not remove any image. Rollback candidates keep their tags.
+func (HostDocker) Tag(ctx context.Context, source, dest string) error {
+	if err := validateImageName(source); err != nil {
+		return err
+	}
+	if err := validateImageName(dest); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "docker", "tag", source, dest)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker tag: %s", truncate(string(out), 200))
+	}
+	return nil
+}
+
+func (HostDocker) ImageBytes(ctx context.Context, image string) (int64, error) {
+	if err := validateImageName(image); err != nil {
+		return 0, err
+	}
+	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", "-f", "{{.Size}}", image)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("docker image inspect: %s", truncate(string(out), 200))
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("docker image inspect: size %q", truncate(string(out), 80))
+	}
+	return n, nil
+}
+
 func (HostDocker) Run(ctx context.Context, image, containerName string, env []EnvPair, containerPort int, vols []VolumeMount) (Instance, error) {
+	return (HostDocker{}).RunLimited(ctx, image, containerName, env, containerPort, vols, Resources{})
+}
+
+// RunLimited is Run with an operator budget. A zero Resources value is
+// the historical 256 MiB / 0.5 CPU / 256 PID default. Invalid budgets
+// are rejected before Docker is invoked.
+func (HostDocker) RunLimited(ctx context.Context, image, containerName string, env []EnvPair, containerPort int, vols []VolumeMount, limits Resources) (Instance, error) {
 	if err := validateImageName(image); err != nil {
 		return Instance{}, err
 	}
@@ -153,7 +223,7 @@ func (HostDocker) Run(ctx context.Context, image, containerName string, env []En
 		return Instance{}, err
 	}
 	publish := "127.0.0.1:" + strconv.Itoa(port) + ":" + strconv.Itoa(containerPort)
-	args, err := dockerRunArgs(image, containerName, publish, env, containerPort, vols, "", "")
+	args, err := dockerRunArgs(image, containerName, publish, env, containerPort, vols, "", "", limits)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -220,6 +290,12 @@ func (HostDocker) EnsureNetwork(ctx context.Context, name string) error {
 // the name other containers on that bridge resolve. There is no host
 // network and no extra published interface.
 func (h HostDocker) RunJoined(ctx context.Context, image, containerName string, env []EnvPair, containerPort int, vols []VolumeMount, network, alias string) (Instance, error) {
+	return h.RunJoinedLimited(ctx, image, containerName, env, containerPort, vols, network, alias, Resources{})
+}
+
+// RunJoinedLimited is RunJoined with an operator budget. The network
+// is still a project bridge and the publish is still loopback.
+func (h HostDocker) RunJoinedLimited(ctx context.Context, image, containerName string, env []EnvPair, containerPort int, vols []VolumeMount, network, alias string, limits Resources) (Instance, error) {
 	if err := validateImageName(image); err != nil {
 		return Instance{}, err
 	}
@@ -243,7 +319,7 @@ func (h HostDocker) RunJoined(ctx context.Context, image, containerName string, 
 		return Instance{}, err
 	}
 	publish := "127.0.0.1:" + strconv.Itoa(port) + ":" + strconv.Itoa(containerPort)
-	args, err := dockerRunArgs(image, containerName, publish, env, containerPort, vols, network, alias)
+	args, err := dockerRunArgs(image, containerName, publish, env, containerPort, vols, network, alias, limits)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -281,18 +357,22 @@ var (
 	networkAliasPattern   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
-func dockerRunArgs(image, containerName, publish string, env []EnvPair, containerPort int, vols []VolumeMount, network, alias string) ([]string, error) {
+func dockerRunArgs(image, containerName, publish string, env []EnvPair, containerPort int, vols []VolumeMount, network, alias string, limits Resources) ([]string, error) {
+	flags, err := resourceFlags(limits)
+	if err != nil {
+		return nil, err
+	}
 	args := []string{
 		"run", "-d",
 		"--name", containerName,
-		"--memory", "256m",
-		"--cpus", "0.5",
-		"--pids-limit", "256",
+	}
+	args = append(args, flags...)
+	args = append(args,
 		"--security-opt", "no-new-privileges",
 		"--cap-drop", "ALL",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
 		"--pull", "never",
-	}
+	)
 	for _, v := range vols {
 		if err := validateVolumeMount(v); err != nil {
 			return nil, err
@@ -493,10 +573,18 @@ func prepareDockerfile(dir, kind string) error {
 	if err := writeExtraFiles(dir, spec.ExtraFiles); err != nil {
 		return err
 	}
-	if spec.GeneratedDockerfile == "" {
-		return nil
+	generated := spec.GeneratedDockerfile != ""
+	if generated {
+		// A Dockerfile already in the repo is the operator's recipe.
+		// writeIfAbsent refuses to replace it; detection normally
+		// takes the Dockerfile pack first, so this is a second guard.
+		if err := writeIfAbsent(filepath.Join(dir, "Dockerfile"), spec.GeneratedDockerfile); err != nil {
+			return err
+		}
 	}
-	return writeIfAbsent(filepath.Join(dir, "Dockerfile"), spec.GeneratedDockerfile)
+	// The ignore file is not a Dockerfile. It only drops VCS metadata
+	// and, for a generated recipe, caches that recipe reinstalls.
+	return mergeBuildIgnore(dir, spec.Kind, generated)
 }
 
 func writeExtraFiles(dir string, files map[string]string) error {

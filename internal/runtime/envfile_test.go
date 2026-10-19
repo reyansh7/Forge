@@ -26,6 +26,36 @@ func TestFormatProductionEnvQuotesAndRejectsReserved(t *testing.T) {
 	}
 }
 
+func TestPublicBuildEnvOmitsSecretsAndChangesWithValue(t *testing.T) {
+	env := []EnvPair{
+		{Key: "DATABASE_URL", Value: "postgres://db/app"},
+		{Key: "NEXT_PUBLIC_API_URL", Value: "http://api.localhost:9080/"},
+		{Key: "VITE_API_URL", Value: "http://api.localhost:9080/"},
+	}
+	pub := PublicBuildEnv(env)
+	if len(pub) != 2 {
+		t.Fatalf("%+v", pub)
+	}
+	body, err := formatProductionEnv(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, "DATABASE_URL") || strings.Contains(body, "postgres") {
+		t.Fatalf("secret reached the build file: %s", body)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(body), "http://api.localhost:9080/") && !strings.Contains(body, "http://api.localhost:9080/") {
+		t.Fatalf("%s", body)
+	}
+	changed := PublicBuildEnv([]EnvPair{{Key: "NEXT_PUBLIC_API_URL", Value: "http://api.localhost:9080/v2/"}})
+	other, err := formatProductionEnv(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body == other {
+		t.Fatal("a new public URL must change the build file so the image layer cannot be reused")
+	}
+}
+
 func TestWriteProductionEnvSkipsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeProductionEnv(dir, nil); err != nil {

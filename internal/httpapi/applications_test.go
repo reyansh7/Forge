@@ -40,16 +40,21 @@ func (m *memApps) CreateApplication(_ context.Context, projectID string, in stor
 	m.seq++
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 	a := store.Application{
-		ID:            "cccccccc-cccc-4000-8000-00000000000" + itoaDigit(m.seq),
-		ProjectID:     projectID,
-		Name:          in.Name,
-		RepositoryURL: in.RepositoryURL,
-		RootDirectory: in.RootDirectory,
-		HealthPath:    in.HealthPath,
-		LocalHost:     in.LocalHost,
-		BuildPackage:  in.BuildPackage,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:                   "cccccccc-cccc-4000-8000-00000000000" + itoaDigit(m.seq),
+		ProjectID:            projectID,
+		Name:                 in.Name,
+		RepositoryURL:        in.RepositoryURL,
+		RootDirectory:        in.RootDirectory,
+		HealthPath:           in.HealthPath,
+		LocalHost:            in.LocalHost,
+		BuildPackage:         in.BuildPackage,
+		MemoryMB:             in.MemoryMB,
+		CPUMillis:            in.CPUMillis,
+		PidsLimit:            in.PidsLimit,
+		HealthTimeoutSeconds: in.HealthTimeoutSeconds,
+		Exposure:             in.Exposure,
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}
 	if a.RootDirectory == "" {
 		a.RootDirectory = "."
@@ -98,6 +103,11 @@ func (m *memApps) UpdateApplication(_ context.Context, id string, in store.Appli
 	a.HealthPath = in.HealthPath
 	a.LocalHost = in.LocalHost
 	a.BuildPackage = in.BuildPackage
+	a.MemoryMB = in.MemoryMB
+	a.CPUMillis = in.CPUMillis
+	a.PidsLimit = in.PidsLimit
+	a.HealthTimeoutSeconds = in.HealthTimeoutSeconds
+	a.Exposure = in.Exposure
 	if a.RootDirectory == "" {
 		a.RootDirectory = "."
 	}

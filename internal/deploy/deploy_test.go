@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -620,6 +621,8 @@ func TestHandlerRejectsOversizeWorkspace(t *testing.T) {
 	for _, want := range []string{
 		"transferred_bytes=unavailable",
 		"workspace_bytes=13",
+		"context_bytes=unavailable",
+		"image_bytes=unavailable",
 		"detect_ms=unavailable",
 		"build_ms=unavailable",
 		"start_ms=unavailable",
@@ -664,6 +667,8 @@ func TestHandlerLogsStageMeasurements(t *testing.T) {
 		"msg=\"deploy measurements\"",
 		"transferred_bytes=unavailable",
 		"workspace_bytes=13",
+		"context_bytes=unavailable",
+		"image_bytes=unavailable",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("log missing %q:\n%s", want, text)
@@ -675,6 +680,45 @@ func TestHandlerLogsStageMeasurements(t *testing.T) {
 		}
 		if !strings.Contains(text, stage+"=") {
 			t.Fatalf("log missing %s:\n%s", stage, text)
+		}
+	}
+}
+
+type sizedBuild struct {
+	stubBuild
+	size int64
+}
+
+func (s sizedBuild) ImageBytes(context.Context, string) (int64, error) {
+	return s.size, nil
+}
+
+func TestHandlerRecordsContextAndImageBytes(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	pid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
+	aid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
+	st := &mem{
+		app: store.Application{ID: aid, ProjectID: pid, Name: "My Portfolio", RepositoryURL: store.SampleHelloURL},
+		dep: store.Deployment{ID: id, ProjectID: pid, ApplicationID: aid, Status: store.StatusQueued},
+	}
+	var logs bytes.Buffer
+	h := Handler{
+		Log:       slog.New(slog.NewTextHandler(&logs, nil)),
+		Store:     st,
+		Fetcher:   stubFetch{},
+		Builder:   sizedBuild{stubBuild: stubBuild{log: "#4 transferring context: 2kB 0.1s done\n#3 transferring context: 263B 0.0s done\n"}, size: 4096},
+		Runner:    &stubRun{},
+		Router:    &stubRouter{},
+		ProxyBase: "http://127.0.0.1:9080",
+		Health:    func(context.Context, int, time.Duration) error { return nil },
+	}
+	if err := h.Handle(context.Background(), testJob(id)); err != nil {
+		t.Fatal(err)
+	}
+	text := logs.String()
+	for _, want := range []string{"context_bytes=2000", "image_bytes=4096", "transferred_bytes=unavailable"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("log missing %q:\n%s", want, text)
 		}
 	}
 }
@@ -756,6 +800,216 @@ func TestCheckWorkspaceSizeSkipsSymlinks(t *testing.T) {
 	if !report.Complete || report.Bytes != 20 {
 		t.Fatalf("bytes = %d, symlink was followed or double-counted", report.Bytes)
 	}
+}
+
+func TestRemoveGitMetadataDropsOversizedPack(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pack := filepath.Join(dir, ".git", "objects", "pack")
+	if err := os.MkdirAll(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack, "pack.bin"), bytes.Repeat([]byte("p"), 80), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeGitMetadata(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf(".git still present: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Dockerfile")); err != nil {
+		t.Fatal(err)
+	}
+	h := Handler{WorkspaceMaxBytes: 40}
+	report, err := h.checkWorkspaceSize(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Complete || report.Bytes != 13 {
+		t.Fatalf("bytes = %d, git metadata was still counted", report.Bytes)
+	}
+}
+
+func TestWorkspaceQuotaStillRejectsOversizedApplicationFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "model.bin"), bytes.Repeat([]byte("m"), 80), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pack := filepath.Join(dir, ".git", "objects", "pack")
+	if err := os.MkdirAll(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack, "pack.bin"), bytes.Repeat([]byte("p"), 200), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeGitMetadata(dir); err != nil {
+		t.Fatal(err)
+	}
+	h := Handler{WorkspaceMaxBytes: 40}
+	_, err := h.checkWorkspaceSize(dir)
+	var quota *workspaceQuotaError
+	if !errors.As(err, &quota) {
+		t.Fatalf("err = %v", err)
+	}
+	if quota.Measured != 80 || quota.Limit != 40 {
+		t.Fatalf("quota = %+v", quota)
+	}
+	if len(quota.Largest) != 1 || quota.Largest[0].Rel != "model.bin" {
+		t.Fatalf("largest = %+v", quota.Largest)
+	}
+	if strings.Contains(err.Error(), ".git") {
+		t.Fatal(err)
+	}
+}
+
+func TestRemoveGitMetadataUnlinksSymlinkWithoutDeletingTarget(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	kept := filepath.Join(outside, "kept.txt")
+	if err := os.WriteFile(kept, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, ".git")); err != nil {
+		t.Skip("symlink not permitted: " + err.Error())
+	}
+	if err := removeGitMetadata(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatalf("symlink target was removed: %v", err)
+	}
+}
+
+func TestHandlerFailsWhenGitCleanupFails(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	pid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
+	aid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
+	st := &mem{
+		app: store.Application{ID: aid, ProjectID: pid, RepositoryURL: store.SampleHelloURL},
+		dep: store.Deployment{ID: id, ProjectID: pid, ApplicationID: aid, Status: store.StatusQueued},
+	}
+	built := false
+	h := Handler{
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:   st,
+		Fetcher: stubFetch{},
+		Builder: buildFlag{called: &built},
+		Runner:  &stubRun{},
+		Router:  &stubRouter{},
+		gitCleanup: func(string) error {
+			return errors.New("remove git metadata: access denied")
+		},
+	}
+	err := h.Handle(context.Background(), testJob(id))
+	if err == nil || !strings.Contains(err.Error(), "remove git metadata") {
+		t.Fatalf("err = %v", err)
+	}
+	if built {
+		t.Fatal("docker build ran after git cleanup failed")
+	}
+	if st.dep.Status != store.StatusFailed || st.dep.FailedStage != string(store.StatusDetecting) {
+		t.Fatalf("status=%q stage=%q", st.dep.Status, st.dep.FailedStage)
+	}
+}
+
+type nodeNoStartFetch struct{}
+
+func (nodeNoStartFetch) Fetch(_ context.Context, _, dest string) error {
+	if err := os.MkdirAll(dest, 0o700); err != nil {
+		return err
+	}
+	// Dependency-only manifest. No Dockerfile, so the Node pack runs.
+	return os.WriteFile(filepath.Join(dest, "package.json"), []byte(`{"dependencies":{"mongodb":"^7.1.1","sharp":"^0.34.5"}}`), 0o600)
+}
+
+func TestHandlerFailsNodeWithoutStartDuringDetecting(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	pid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
+	aid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
+	st := &mem{
+		app: store.Application{ID: aid, ProjectID: pid, RepositoryURL: "https://github.com/example/app"},
+		dep: store.Deployment{ID: id, ProjectID: pid, ApplicationID: aid, Status: store.StatusQueued},
+	}
+	built := false
+	var logs bytes.Buffer
+	h := Handler{
+		Log:     slog.New(slog.NewTextHandler(&logs, nil)),
+		Store:   st,
+		Fetcher: nodeNoStartFetch{},
+		Builder: buildFlag{called: &built},
+		Runner:  &stubRun{},
+		Router:  &stubRouter{},
+	}
+	err := h.Handle(context.Background(), testJob(id))
+	if err == nil || !strings.Contains(err.Error(), "start script") {
+		t.Fatalf("err = %v", err)
+	}
+	if built {
+		t.Fatal("docker build ran after detection refused npm start")
+	}
+	if st.dep.Status != store.StatusFailed || st.dep.FailedStage != string(store.StatusDetecting) {
+		t.Fatalf("status=%q stage=%q", st.dep.Status, st.dep.FailedStage)
+	}
+	if !strings.Contains(st.dep.ErrorMessage, "start script") || !strings.Contains(st.dep.ErrorMessage, "forge.json") {
+		t.Fatalf("error_message = %q", st.dep.ErrorMessage)
+	}
+	text := logs.String()
+	if !strings.Contains(text, "deployment failed") || !strings.Contains(text, "stage=detecting") || !strings.Contains(text, "start script") {
+		t.Fatalf("log = %s", text)
+	}
+}
+
+type gitPackFetch struct{}
+
+func (gitPackFetch) Fetch(_ context.Context, _, dest string) error {
+	pack := filepath.Join(dest, ".git", "objects", "pack")
+	if err := os.MkdirAll(pack, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(pack, "pack.bin"), bytes.Repeat([]byte("p"), 80), 0o600); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dest, "Dockerfile"), []byte("FROM scratch\n"), 0o600)
+}
+
+func TestHandlerIgnoresOversizedGitMetadata(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	pid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1"
+	aid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2"
+	st := &mem{
+		app: store.Application{ID: aid, ProjectID: pid, RepositoryURL: "https://github.com/example/app"},
+		dep: store.Deployment{ID: id, ProjectID: pid, ApplicationID: aid, Status: store.StatusQueued},
+	}
+	var logs bytes.Buffer
+	h := Handler{
+		Log:               slog.New(slog.NewTextHandler(&logs, nil)),
+		Store:             st,
+		Fetcher:           gitPackFetch{},
+		Builder:           stubBuild{},
+		Runner:            &stubRun{},
+		Router:            &stubRouter{},
+		WorkspaceMaxBytes: 40,
+		Health:            func(context.Context, int, time.Duration) error { return nil },
+	}
+	if err := h.Handle(context.Background(), testJob(id)); err != nil {
+		t.Fatal(err)
+	}
+	if st.dep.Status != store.StatusLive {
+		t.Fatalf("status=%q err=%q", st.dep.Status, st.dep.ErrorMessage)
+	}
+	if !strings.Contains(logs.String(), "workspace_bytes=13") {
+		t.Fatalf("log = %s", logs.String())
+	}
+}
+
+type buildFlag struct{ called *bool }
+
+func (b buildFlag) Build(context.Context, string, string, string, []runtime.EnvPair) (string, error) {
+	*b.called = true
+	return "", nil
 }
 
 func TestHandlerRejectsUnknownType(t *testing.T) {
@@ -948,7 +1202,7 @@ func TestHandlerFailsWhenContainerExits(t *testing.T) {
 	if st.dep.Status != store.StatusFailed || st.dep.FailedStage != string(store.StatusDeploying) {
 		t.Fatalf("status=%q stage=%q", st.dep.Status, st.dep.FailedStage)
 	}
-	if !strings.Contains(st.dep.ErrorMessage, "exited immediately") {
+	if !strings.Contains(st.dep.ErrorMessage, "process startup failed") || strings.Contains(st.dep.ErrorMessage, "readiness check failed") {
 		t.Fatalf("err = %q", st.dep.ErrorMessage)
 	}
 	if len(run.stopped) == 0 {

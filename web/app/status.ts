@@ -75,3 +75,61 @@ export function formatDuration(ms?: number): string {
 export function isInProgress(status: string): boolean {
   return status !== "live" && status !== "failed" && status !== "stopped";
 }
+
+export function elapsedSince(iso: string, now = Date.now()): string {
+  const started = Date.parse(iso);
+  if (Number.isNaN(started)) {
+    return "";
+  }
+  return formatDuration(Math.max(0, now - started));
+}
+
+export type AttemptFacts = {
+  status: string;
+  failed_stage?: string;
+  build_log?: string;
+  updated_at?: string;
+};
+
+// stageExplanation describes the real pipeline step. It does not invent
+// a percentage. A long detecting or building stage is still active.
+export function stageExplanation(d: AttemptFacts): string {
+  if (d.status === "failed") {
+    const stage = d.failed_stage ? statusLabel(d.failed_stage) : "this attempt";
+    if (!d.build_log && (d.failed_stage === "queued" || d.failed_stage === "detecting" || !d.failed_stage)) {
+      return `Failed during ${stage}, before a Docker build started. There is no build log because the image was never built. The error below is from the platform.`;
+    }
+    if (d.build_log) {
+      return `Failed during ${stage}. The text below is the builder output, not the running application's logs. A failed health check leaves the previous live release serving.`;
+    }
+    return `Failed during ${stage}. The error below is the platform record for this attempt.`;
+  }
+  switch (d.status) {
+    case "queued":
+      return "Waiting for a worker to claim this attempt. Nothing has been fetched or built, so there is no build log yet.";
+    case "detecting":
+      return "Fetching the repository and choosing a build. A large checkout can stay here for several minutes. Docker has not started, so a build log is not available yet.";
+    case "building":
+      return "Docker is building the image. Copying a large project can take many minutes before log lines are saved. The log appears when this stage finishes.";
+    case "provisioning":
+      return "Preparing the runtime for this attempt. Traffic has not moved.";
+    case "deploying":
+      return "Starting the new container. The previous live release keeps serving until the health check passes.";
+    case "health_check":
+      return "Waiting for the new container to answer its health check. If this never passes, the previous live release stays in place.";
+    case "live":
+      return "This attempt is the serving release for its environment.";
+    case "stopped":
+      return "An operator stopped this release. It is not receiving traffic.";
+    default:
+      return "";
+  }
+}
+
+export function workerUnresponsiveNote(nodeStatus: string | undefined, nodeName: string | undefined): string | null {
+  if (nodeStatus !== "dead") {
+    return null;
+  }
+  const who = nodeName ? `Worker “${nodeName}”` : "The worker for this attempt";
+  return `${who} is marked dead because it stopped sending heartbeats. That is separate from a slow build. Stop fails this attempt so you can deploy again. Stopping also takes the serving release in this environment offline. Volumes and images are kept.`;
+}

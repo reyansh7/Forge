@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -44,7 +45,7 @@ func dependenciesPending(v store.SagaView) bool {
 	if !v.InSaga {
 		return false
 	}
-	self := detect.Service{Name: v.ServiceName}
+	self := sagaService(v, v.ServiceName)
 	for _, sib := range v.Siblings {
 		if sib.DeploymentID == "" && sib.Name == v.ServiceName {
 			continue
@@ -52,7 +53,7 @@ func dependenciesPending(v store.SagaView) bool {
 		if sib.Name == v.ServiceName {
 			continue
 		}
-		if !detect.DependsOn(self, detect.Service{Name: sib.Name}) {
+		if !detect.DependsOn(self, sagaService(v, sib.Name)) {
 			continue
 		}
 		switch sib.Status {
@@ -68,7 +69,13 @@ func dependenciesPending(v store.SagaView) bool {
 // exposePublic is false for backends, workers, and ML services unless
 // the operator set local_host. Frontends stay on Caddy. The loopback
 // publish used for health checks is separate and is not a public route.
-func exposePublic(name, localHost string) bool {
+func exposePublic(name, localHost, exposure string) bool {
+	switch strings.TrimSpace(exposure) {
+	case "public":
+		return true
+	case "private":
+		return false
+	}
 	if strings.TrimSpace(localHost) != "" {
 		return true
 	}
@@ -80,15 +87,55 @@ func exposePublic(name, localHost string) bool {
 	}
 }
 
-func serviceLinkURL(proxyBase string, tgt store.Application, listen int) string {
-	if exposePublic(tgt.Name, tgt.LocalHost) {
-		return store.ServiceHostURL(proxyBase, tgt)
+func dependencyFailed(v store.SagaView) string {
+	if !v.InSaga {
+		return ""
 	}
-	slug := strings.TrimSpace(tgt.LocalHost)
-	if slug == "" {
-		slug = store.SuggestedLocalHost(tgt.Name, tgt.ID)
+	self := sagaService(v, v.ServiceName)
+	for _, sib := range v.Siblings {
+		if sib.Name == "" || sib.Name == v.ServiceName {
+			continue
+		}
+		if !detect.DependsOn(self, sagaService(v, sib.Name)) {
+			continue
+		}
+		if sib.Status == string(store.StatusFailed) {
+			return sib.Name
+		}
 	}
-	return store.InternalServiceURL(slug, listen)
+	return ""
+}
+
+func serviceLinkURL(proxyBase string, tgt store.Application, listen int, envKey string) string {
+	// A browser bundle cannot resolve Docker bridge DNS. Public build
+	// keys always get the proxy address, with one trailing slash, even
+	// when the target is a private backend. Server-side keys such as
+	// ML_SERVICE_URL stay on the project network.
+	if runtime.IsPublicBuildKey(envKey) || exposePublic(tgt.Name, tgt.LocalHost, tgt.Exposure) {
+		u := store.ServiceHostURL(proxyBase, tgt)
+		if envKey == "CORS_ORIGIN" {
+			return store.OriginOf(u)
+		}
+		return u
+	}
+	u := store.InternalServiceURL(store.BridgeAlias(tgt.Name, tgt.LocalHost, tgt.ID), listen)
+	if envKey == "CORS_ORIGIN" {
+		return store.OriginOf(u)
+	}
+	return u
+}
+
+func sagaService(v store.SagaView, name string) detect.Service {
+	var snap struct {
+		Services []detect.Service `json:"services"`
+	}
+	_ = json.Unmarshal(v.Plan, &snap)
+	for _, svc := range snap.Services {
+		if svc.Name == name {
+			return svc
+		}
+	}
+	return detect.Service{Name: name}
 }
 
 // compensationOrder is reverse promotion order. A service with no
@@ -237,7 +284,20 @@ func (h Handler) startContainer(ctx context.Context, d store.Deployment, app sto
 	if err != nil {
 		return runtime.Instance{}, store.SagaView{}, err
 	}
+	limits := runtime.Resources{MemoryMB: app.MemoryMB, CPUMillis: app.CPUMillis, Pids: app.PidsLimit}
+	if err := limits.Validate(); err != nil {
+		return runtime.Instance{}, view, err
+	}
 	if !view.InSaga {
+		if lr, ok := h.Runner.(interface {
+			RunLimited(ctx context.Context, image, containerName string, env []runtime.EnvPair, containerPort int, vols []runtime.VolumeMount, limits runtime.Resources) (runtime.Instance, error)
+		}); ok {
+			inst, err := lr.RunLimited(ctx, d.ImageName, runtime.WorkloadName(app.Name, d.ID), env, port, vols, limits)
+			return inst, view, err
+		}
+		if limits.Custom() {
+			return runtime.Instance{}, view, fmt.Errorf("runner cannot apply the application resource limits")
+		}
 		inst, err := h.Runner.Run(ctx, d.ImageName, runtime.WorkloadName(app.Name, d.ID), env, port, vols)
 		return inst, view, err
 	}
@@ -249,14 +309,23 @@ func (h Handler) startContainer(ctx context.Context, d store.Deployment, app sto
 	if err != nil {
 		return runtime.Instance{}, view, err
 	}
-	slug := strings.TrimSpace(app.LocalHost)
-	if slug == "" {
-		slug = store.SuggestedLocalHost(app.Name, app.ID)
-	}
+	// The bridge alias is the service name, including reserved public
+	// labels such as "api". The public Host slug is chosen later and
+	// still avoids those labels.
+	alias := store.BridgeAlias(app.Name, app.LocalHost, app.ID)
 	if err := jr.EnsureNetwork(ctx, network); err != nil {
 		return runtime.Instance{}, view, err
 	}
-	inst, err := jr.RunJoined(ctx, d.ImageName, runtime.WorkloadName(app.Name, d.ID), env, port, vols, network, slug)
+	if lj, ok := jr.(interface {
+		RunJoinedLimited(ctx context.Context, image, containerName string, env []runtime.EnvPair, containerPort int, vols []runtime.VolumeMount, network, alias string, limits runtime.Resources) (runtime.Instance, error)
+	}); ok {
+		inst, err := lj.RunJoinedLimited(ctx, d.ImageName, runtime.WorkloadName(app.Name, d.ID), env, port, vols, network, alias, limits)
+		return inst, view, err
+	}
+	if limits.Custom() {
+		return runtime.Instance{}, view, fmt.Errorf("runner cannot apply the application resource limits")
+	}
+	inst, err := jr.RunJoined(ctx, d.ImageName, runtime.WorkloadName(app.Name, d.ID), env, port, vols, network, alias)
 	return inst, view, err
 }
 

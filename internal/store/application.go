@@ -31,18 +31,35 @@ type Application struct {
 	// BuildPackage is optional, for example ./cmd/api. Empty lets the
 	// detector choose the only main package.
 	BuildPackage string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// MemoryMB, CPUMillis, and PidsLimit are the next container's
+	// budget. Zero keeps 256 MiB, 500 milli-CPU, and 256 processes.
+	MemoryMB  int
+	CPUMillis int
+	PidsLimit int
+	// HealthTimeoutSeconds is the readiness probe budget. Zero keeps 45s.
+	// Process startup is separate: a container that exits before the
+	// probe is a start failure, not a slow health check.
+	HealthTimeoutSeconds int
+	// Exposure is "", "public", or "private". Empty keeps the role
+	// default: frontends are routed, backends and ML services are not.
+	Exposure  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // ApplicationInput is a validated create/update payload.
 type ApplicationInput struct {
-	Name          string
-	RepositoryURL string
-	RootDirectory string
-	HealthPath    string
-	LocalHost     string
-	BuildPackage  string
+	Name                 string
+	RepositoryURL        string
+	RootDirectory        string
+	HealthPath           string
+	LocalHost            string
+	BuildPackage         string
+	MemoryMB             int
+	CPUMillis            int
+	PidsLimit            int
+	HealthTimeoutSeconds int
+	Exposure             string
 }
 
 // ValidateApplicationInput matches project URL rules plus a name.
@@ -74,19 +91,35 @@ func (p *Postgres) CreateApplication(ctx context.Context, projectID string, in A
 	if err != nil {
 		return Application{}, err
 	}
+	memory, cpu, pids, healthTO := in.MemoryMB, in.CPUMillis, in.PidsLimit, in.HealthTimeoutSeconds
+	exposure := in.Exposure
 	in, err = ValidateApplication(in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost)
 	if err != nil {
 		return Application{}, err
 	}
+	if err := ValidateResources(memory, cpu, pids, healthTO); err != nil {
+		return Application{}, err
+	}
+	if err := ValidateExposure(exposure); err != nil {
+		return Application{}, err
+	}
 	in.BuildPackage = pkg
+	in.MemoryMB, in.CPUMillis, in.PidsLimit, in.HealthTimeoutSeconds = memory, cpu, pids, healthTO
+	in.Exposure = exposure
 
 	var out Application
 	err = p.db.QueryRowContext(ctx, `
-		INSERT INTO applications (project_id, name, repository_url, root_directory, health_path, local_host, build_package)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
-		RETURNING id::text, project_id::text, name, repository_url, root_directory, health_path, local_host, build_package, created_at, updated_at
-	`, projectID, in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost, in.BuildPackage).Scan(
-		&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.BuildPackage, &out.CreatedAt, &out.UpdatedAt,
+		INSERT INTO applications (
+			project_id, name, repository_url, root_directory, health_path, local_host, build_package,
+			memory_mb, cpu_millis, pids_limit, health_timeout_seconds, exposure
+		)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id::text, project_id::text, name, repository_url, root_directory, health_path, local_host, build_package,
+		          memory_mb, cpu_millis, pids_limit, health_timeout_seconds, exposure, created_at, updated_at
+	`, projectID, in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost, in.BuildPackage,
+		in.MemoryMB, in.CPUMillis, in.PidsLimit, in.HealthTimeoutSeconds, in.Exposure).Scan(
+		&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.BuildPackage,
+		&out.MemoryMB, &out.CPUMillis, &out.PidsLimit, &out.HealthTimeoutSeconds, &out.Exposure, &out.CreatedAt, &out.UpdatedAt,
 	)
 	if isUniqueViolation(err) {
 		return Application{}, conflictApplication(err)
@@ -130,19 +163,33 @@ func (p *Postgres) UpdateApplication(ctx context.Context, id string, in Applicat
 	if err != nil {
 		return Application{}, err
 	}
+	memory, cpu, pids, healthTO := in.MemoryMB, in.CPUMillis, in.PidsLimit, in.HealthTimeoutSeconds
+	exposure := in.Exposure
 	in, err = ValidateApplication(in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost)
 	if err != nil {
 		return Application{}, err
 	}
+	if err := ValidateResources(memory, cpu, pids, healthTO); err != nil {
+		return Application{}, err
+	}
+	if err := ValidateExposure(exposure); err != nil {
+		return Application{}, err
+	}
 	in.BuildPackage = pkg
+	in.MemoryMB, in.CPUMillis, in.PidsLimit, in.HealthTimeoutSeconds = memory, cpu, pids, healthTO
+	in.Exposure = exposure
 	var out Application
 	err = p.db.QueryRowContext(ctx, `
 		UPDATE applications
-		SET name = $2, repository_url = $3, root_directory = $4, health_path = $5, local_host = $6, build_package = $7, updated_at = now()
+		SET name = $2, repository_url = $3, root_directory = $4, health_path = $5, local_host = $6, build_package = $7,
+		    memory_mb = $8, cpu_millis = $9, pids_limit = $10, health_timeout_seconds = $11, exposure = $12, updated_at = now()
 		WHERE id = $1::uuid
-		RETURNING id::text, project_id::text, name, repository_url, root_directory, health_path, local_host, build_package, created_at, updated_at
-	`, id, in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost, in.BuildPackage).Scan(
-		&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.BuildPackage, &out.CreatedAt, &out.UpdatedAt,
+		RETURNING id::text, project_id::text, name, repository_url, root_directory, health_path, local_host, build_package,
+		          memory_mb, cpu_millis, pids_limit, health_timeout_seconds, exposure, created_at, updated_at
+	`, id, in.Name, in.RepositoryURL, in.RootDirectory, in.HealthPath, in.LocalHost, in.BuildPackage,
+		in.MemoryMB, in.CPUMillis, in.PidsLimit, in.HealthTimeoutSeconds, in.Exposure).Scan(
+		&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.BuildPackage,
+		&out.MemoryMB, &out.CPUMillis, &out.PidsLimit, &out.HealthTimeoutSeconds, &out.Exposure, &out.CreatedAt, &out.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Application{}, ErrNotFound
@@ -179,13 +226,15 @@ const applicationSelect = `
 	SELECT id::text, project_id::text, name, repository_url,
 	       COALESCE(root_directory, '.'), COALESCE(health_path, '/'), COALESCE(local_host, ''),
 	       COALESCE(build_package, ''),
+	       COALESCE(memory_mb, 0), COALESCE(cpu_millis, 0), COALESCE(pids_limit, 0), COALESCE(health_timeout_seconds, 0),
+	       COALESCE(exposure, ''),
 	       created_at, updated_at
 	FROM applications
 `
 
 func scanApplication(row *sql.Row) (Application, error) {
 	var out Application
-	err := row.Scan(&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.BuildPackage, &out.CreatedAt, &out.UpdatedAt)
+	err := row.Scan(&out.ID, &out.ProjectID, &out.Name, &out.RepositoryURL, &out.RootDirectory, &out.HealthPath, &out.LocalHost, &out.BuildPackage, &out.MemoryMB, &out.CPUMillis, &out.PidsLimit, &out.HealthTimeoutSeconds, &out.Exposure, &out.CreatedAt, &out.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Application{}, ErrNotFound
 	}
@@ -199,7 +248,7 @@ func scanApplications(rows *sql.Rows) ([]Application, error) {
 	out := make([]Application, 0)
 	for rows.Next() {
 		var item Application
-		if err := rows.Scan(&item.ID, &item.ProjectID, &item.Name, &item.RepositoryURL, &item.RootDirectory, &item.HealthPath, &item.LocalHost, &item.BuildPackage, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.Name, &item.RepositoryURL, &item.RootDirectory, &item.HealthPath, &item.LocalHost, &item.BuildPackage, &item.MemoryMB, &item.CPUMillis, &item.PidsLimit, &item.HealthTimeoutSeconds, &item.Exposure, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan application: %w", err)
 		}
 		out = append(out, item)

@@ -14,6 +14,32 @@ import (
 // strings, which is why EmailJS reported "public key is required".
 const productionEnvName = ".env.production.local"
 
+// IsPublicBuildKey is a value the browser bundle is allowed to inline.
+//
+// Vite, Next.js, and CRA replace these prefixes at build time. Any
+// other key, including a database URL or a token, stays a runtime -e
+// value and is not written into the image or passed as --build-arg.
+// A secret placed in one of these prefixes is still inlined by the
+// framework; the operator must not put a secret in a public key.
+func IsPublicBuildKey(key string) bool {
+	return strings.HasPrefix(key, "NEXT_PUBLIC_") ||
+		strings.HasPrefix(key, "VITE_") ||
+		strings.HasPrefix(key, "REACT_APP_")
+}
+
+// PublicBuildEnv is the subset that reaches the image build. Two
+// different values produce two different files, so a later COPY of the
+// build context cannot reuse the layer that baked the previous URL.
+func PublicBuildEnv(env []EnvPair) []EnvPair {
+	out := make([]EnvPair, 0, len(env))
+	for _, ev := range env {
+		if IsPublicBuildKey(ev.Key) {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
 // writeProductionEnv materializes operator env for the image build.
 //
 // Empty env leaves any repository file alone. Non-empty env overwrites

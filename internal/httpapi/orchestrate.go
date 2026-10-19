@@ -32,15 +32,18 @@ type deployPlanSnapshot struct {
 }
 
 type projectDeployServiceResponse struct {
-	Name          string `json:"name"`
-	ApplicationID string `json:"application_id"`
-	DeploymentID  string `json:"deployment_id,omitempty"`
-	Root          string `json:"root"`
-	Package       string `json:"package,omitempty"`
-	Port          int    `json:"port,omitempty"`
-	Status        string `json:"status"`
-	Error         string `json:"error,omitempty"`
-	InternalURL   string `json:"internal_url,omitempty"`
+	Name          string   `json:"name"`
+	ApplicationID string   `json:"application_id"`
+	DeploymentID  string   `json:"deployment_id,omitempty"`
+	Root          string   `json:"root"`
+	Package       string   `json:"package,omitempty"`
+	Port          int      `json:"port,omitempty"`
+	Status        string   `json:"status"`
+	Error         string   `json:"error,omitempty"`
+	PublicURL     string   `json:"public_url,omitempty"`
+	InternalURL   string   `json:"internal_url,omitempty"`
+	DependsOn     []string `json:"depends_on,omitempty"`
+	GeneratedEnv  []string `json:"generated_env,omitempty"`
 }
 
 type projectDeployResponse struct {
@@ -137,38 +140,56 @@ func (s *Server) deployProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	view, status, msg := s.enqueueProjectServices(ctx, r, project, actor, selected, store.CommitMeta{})
+	if status != http.StatusAccepted {
+		writeError(w, status, msg)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, view)
+}
+
+// enqueueProjectServices queues one existing deployment per service.
+//
+// The commit is the same on every service. Generated link keys overwrite
+// a user value of the same name so a pasted URL cannot drift. Other
+// user variables are left alone. A dependency cycle is a 400: Forge
+// does not pick an order.
+func (s *Server) enqueueProjectServices(ctx context.Context, r *http.Request, project store.Project, actor Actor, selected []detect.Service, commit store.CommitMeta) (projectDeployResponse, int, string) {
 	apps, err := s.Apps.ListApplicationsByProject(ctx, project.ID)
 	if err != nil {
 		s.logger().Error("list apps for project deploy failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to create deployment")
-		return
+		return projectDeployResponse{}, http.StatusInternalServerError, "failed to create deployment"
 	}
 	byName := map[string]store.Application{}
 	for _, svc := range selected {
 		app, err := s.ensureServiceApp(ctx, project, apps, svc)
 		if err != nil {
 			s.logger().Error("ensure service app failed", "err", err)
-			writeError(w, http.StatusInternalServerError, "failed to prepare "+svc.Name)
-			return
+			return projectDeployResponse{}, http.StatusInternalServerError, "failed to prepare " + svc.Name
 		}
 		byName[svc.Name] = app
 		apps = append(apps, app)
+		s.persistServiceVolumes(ctx, app.ID, svc)
 	}
 
-	links, note := detect.SuggestLinks(selected)
+	links, note, err := detect.ResolveLinks(selected)
+	if err != nil {
+		return projectDeployResponse{}, http.StatusBadRequest, err.Error()
+	}
 	s.persistSuggestedLinks(ctx, links, byName)
 
-	ordered := detect.DeployOrder(selected)
+	ordered, err := detect.OrderServices(selected)
+	if err != nil {
+		return projectDeployResponse{}, http.StatusBadRequest, err.Error()
+	}
 	plan, err := json.Marshal(deployPlanSnapshot{Services: ordered, Links: links, Note: note})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create deployment")
-		return
+		return projectDeployResponse{}, http.StatusInternalServerError, "failed to create deployment"
 	}
 	rollout, err := s.ProjectDeploys.CreateProjectDeployment(ctx, project.ID, note, plan)
 	if err != nil {
 		s.logger().Error("create project deployment failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "failed to create deployment")
-		return
+		return projectDeployResponse{}, http.StatusInternalServerError, "failed to create deployment"
 	}
 
 	// Queue dependencies first. countQuota is false because the batch
@@ -198,7 +219,7 @@ func (s *Server) deployProject(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		d, prep := s.createQueuedDeployment(ctx, app.ID, store.EnvProduction, actor.UserID, store.CommitMeta{}, false)
+		d, prep := s.createQueuedDeployment(ctx, app.ID, store.EnvProduction, actor.UserID, commit, false)
 		if prep.message != "" {
 			row.Status = "failed"
 			row.ErrorMessage = prep.message
@@ -223,8 +244,7 @@ func (s *Server) deployProject(w http.ResponseWriter, r *http.Request) {
 		saved, err := s.ProjectDeploys.AddProjectDeploymentService(ctx, row)
 		if err != nil {
 			s.logger().Error("record project service failed", "err", err)
-			writeError(w, http.StatusInternalServerError, "failed to record project deployment")
-			return
+			return projectDeployResponse{}, http.StatusInternalServerError, "failed to record project deployment"
 		}
 		queued = append(queued, saved)
 	}
@@ -237,7 +257,7 @@ func (s *Server) deployProject(w http.ResponseWriter, r *http.Request) {
 
 	view := s.projectDeployJSON(ctx, rollout, queued)
 	s.audit(r, "", "project.deploy", "project", project.ID, map[string]string{"project_deployment_id": rollout.ID, "status": view.Status})
-	writeJSON(w, http.StatusAccepted, view)
+	return view, http.StatusAccepted, ""
 }
 
 func selectServices(found []detect.Service, names []string) []detect.Service {
@@ -268,25 +288,87 @@ func (s *Server) ensureServiceApp(ctx context.Context, project store.Project, ap
 		if app.Name != svc.Name {
 			continue
 		}
-		if app.RootDirectory == svc.Root && app.BuildPackage == svc.Package && app.RepositoryURL == project.RepositoryURL {
+		health := app.HealthPath
+		if svc.Health != "" {
+			health = svc.Health
+		}
+		local := app.LocalHost
+		exposure := exposureFromService(svc)
+		if exposure == "private" {
+			local = ""
+		}
+		if exposure == "public" && strings.TrimSpace(local) == "" {
+			local = store.SuggestedLocalHost(svc.Name, app.ID)
+		}
+		if app.RootDirectory == svc.Root && app.BuildPackage == svc.Package && app.RepositoryURL == project.RepositoryURL && app.HealthPath == health && app.Exposure == exposure && app.LocalHost == local {
 			return app, nil
 		}
 		return s.Apps.UpdateApplication(ctx, app.ID, store.ApplicationInput{
-			Name:          app.Name,
-			RepositoryURL: project.RepositoryURL,
-			RootDirectory: svc.Root,
-			HealthPath:    app.HealthPath,
-			LocalHost:     app.LocalHost,
-			BuildPackage:  svc.Package,
+			Name:                 app.Name,
+			RepositoryURL:        project.RepositoryURL,
+			RootDirectory:        svc.Root,
+			HealthPath:           health,
+			LocalHost:            local,
+			BuildPackage:         svc.Package,
+			MemoryMB:             app.MemoryMB,
+			CPUMillis:            app.CPUMillis,
+			PidsLimit:            app.PidsLimit,
+			HealthTimeoutSeconds: app.HealthTimeoutSeconds,
+			Exposure:             exposure,
 		})
 	}
+	health := "/"
+	if svc.Health != "" {
+		health = svc.Health
+	}
+	exposure := exposureFromService(svc)
 	return s.Apps.CreateApplication(ctx, project.ID, store.ApplicationInput{
 		Name:          svc.Name,
 		RepositoryURL: project.RepositoryURL,
 		RootDirectory: svc.Root,
-		HealthPath:    "/",
+		HealthPath:    health,
 		BuildPackage:  svc.Package,
+		Exposure:      exposure,
 	})
+}
+
+func serviceRoutable(app store.Application) bool {
+	switch strings.TrimSpace(app.Exposure) {
+	case "public":
+		return true
+	case "private":
+		return false
+	}
+	if strings.TrimSpace(app.LocalHost) != "" {
+		return true
+	}
+	switch detect.ServiceRole(detect.Service{Name: app.Name}) {
+	case "backend", "worker", "ml":
+		return false
+	default:
+		return true
+	}
+}
+
+func exposureFromService(svc detect.Service) string {
+	if svc.Public == nil {
+		return ""
+	}
+	if *svc.Public {
+		return "public"
+	}
+	return "private"
+}
+
+func (s *Server) persistServiceVolumes(ctx context.Context, applicationID string, svc detect.Service) {
+	if s.Volumes == nil {
+		return
+	}
+	for _, vol := range svc.Volumes {
+		if _, err := s.Volumes.CreateApplicationVolume(ctx, applicationID, vol.Name, vol.Path); err != nil && !errors.Is(err, store.ErrConflict) {
+			s.logger().Error("persist service volume failed", "err", err, "service", svc.Name)
+		}
+	}
 }
 
 func (s *Server) persistSuggestedLinks(ctx context.Context, links []detect.SuggestedLink, byName map[string]store.Application) {
@@ -452,8 +534,14 @@ func (s *Server) projectDeployJSON(ctx context.Context, rollout store.ProjectDep
 	var snap deployPlanSnapshot
 	_ = json.Unmarshal(rollout.Plan, &snap)
 	ports := map[string]int{}
+	deps := map[string][]string{}
 	for _, svc := range snap.Services {
 		ports[svc.Name] = svc.Port
+		deps[svc.Name] = svc.DependsOn
+	}
+	envKeys := map[string][]string{}
+	for _, link := range snap.Links {
+		envKeys[link.Source] = append(envKeys[link.Source], link.EnvKey)
 	}
 	states := make([]string, 0, len(svcs))
 	out := projectDeployResponse{
@@ -479,10 +567,19 @@ func (s *Server) projectDeployJSON(ctx context.Context, rollout store.ProjectDep
 			Port:          ports[svc.ServiceName],
 			Status:        svc.Status,
 			Error:         svc.ErrorMessage,
+			DependsOn:     deps[svc.ServiceName],
+			GeneratedEnv:  envKeys[svc.ServiceName],
 		}
 		if s.Apps != nil {
 			if app, err := s.Apps.GetApplication(ctx, svc.ApplicationID); err == nil {
-				item.InternalURL = store.ServiceHostURL(s.proxyBase(), app)
+				listen := ports[svc.ServiceName]
+				if listen <= 0 {
+					listen = 8080
+				}
+				item.InternalURL = store.InternalServiceURL(store.BridgeAlias(app.Name, app.LocalHost, app.ID), listen)
+				if serviceRoutable(app) {
+					item.PublicURL = store.ServiceHostURL(s.proxyBase(), app)
+				}
 			}
 		}
 		if svc.DeploymentID != "" && s.Deployments != nil {
@@ -530,6 +627,128 @@ func (s *Server) projectDeployJSON(ctx context.Context, rollout store.ProjectDep
 		out.ErrorMessage = "a required service is not healthy"
 	}
 	return out
+}
+
+// rollbackProjectDeploy queues the existing per-application rollback
+// for every service in one project release. It does not build. Each
+// child copies the image from the selected release. A service without
+// an image refuses the whole request before any job is queued.
+func (s *Server) rollbackProjectDeploy(w http.ResponseWriter, r *http.Request) {
+	if s.ProjectDeploys == nil || s.Deployments == nil || s.Jobs == nil {
+		writeError(w, http.StatusInternalServerError, "project deploy is not configured")
+		return
+	}
+	projectID, err := store.ParseUUID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	deployID, err := store.ParseUUID(r.PathValue("deployId"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid project deployment id")
+		return
+	}
+	project, ok := s.requireProject(w, r, projectID)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	rollout, svcs, err := s.ProjectDeploys.GetProjectDeployment(ctx, deployID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && rollout.ProjectID != projectID) {
+		writeError(w, http.StatusNotFound, "project deployment not found")
+		return
+	}
+	if err != nil {
+		s.logger().Error("get project deployment failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to roll back")
+		return
+	}
+	if len(svcs) == 0 {
+		writeError(w, http.StatusConflict, "that project deployment has no services to roll back")
+		return
+	}
+	sources := make([]store.Deployment, 0, len(svcs))
+	for _, svc := range svcs {
+		if svc.DeploymentID == "" {
+			writeError(w, http.StatusConflict, svc.ServiceName+" has no image to roll back to")
+			return
+		}
+		d, err := s.Deployments.GetDeployment(ctx, svc.DeploymentID)
+		if err != nil || strings.TrimSpace(d.ImageName) == "" {
+			writeError(w, http.StatusConflict, svc.ServiceName+" has no image to roll back to")
+			return
+		}
+		sources = append(sources, d)
+	}
+	inFlight, err := s.Deployments.CountInProgressByOwner(ctx, project.OwnerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to roll back")
+		return
+	}
+	if inFlight > 0 {
+		writeError(w, http.StatusConflict, "a deployment is already in progress")
+		return
+	}
+	next, err := s.ProjectDeploys.CreateProjectDeployment(ctx, project.ID, "rollback of "+rollout.ID, rollout.Plan)
+	if err != nil {
+		s.logger().Error("create rollback project deployment failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to roll back")
+		return
+	}
+	var queued []store.ProjectDeploymentService
+	stopped := ""
+	for i, svc := range svcs {
+		row := store.ProjectDeploymentService{
+			ProjectDeploymentID: next.ID,
+			ApplicationID:       svc.ApplicationID,
+			ServiceName:         svc.ServiceName,
+			RootDirectory:       svc.RootDirectory,
+			BuildPackage:        svc.BuildPackage,
+			Status:              "queued",
+		}
+		if stopped != "" {
+			row.Status = "failed"
+			row.ErrorMessage = stopped
+			saved, err := s.ProjectDeploys.AddProjectDeploymentService(ctx, row)
+			if err == nil {
+				queued = append(queued, saved)
+			}
+			continue
+		}
+		d, err := s.Deployments.CreateRollbackDeployment(ctx, sources[i].ID)
+		if err != nil {
+			row.Status = "failed"
+			row.ErrorMessage = "failed to roll back " + svc.ServiceName
+			stopped = row.ErrorMessage
+			_ = s.ProjectDeploys.SetProjectDeploymentStatus(ctx, next.ID, "failed", stopped)
+		} else {
+			out := s.enqueueDeploymentJob(r, ctx, d)
+			row.DeploymentID = d.ID
+			if out.deployment.ID != "" {
+				row.DeploymentID = out.deployment.ID
+			}
+			if out.status != http.StatusAccepted {
+				row.Status = "failed"
+				row.ErrorMessage = out.message
+				stopped = out.message
+				_ = s.ProjectDeploys.SetProjectDeploymentStatus(ctx, next.ID, "failed", out.message)
+			}
+		}
+		saved, err := s.ProjectDeploys.AddProjectDeploymentService(ctx, row)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record project deployment")
+			return
+		}
+		queued = append(queued, saved)
+	}
+	if stopped != "" {
+		next.Status = "failed"
+		next.ErrorMessage = stopped
+	}
+	view := s.projectDeployJSON(ctx, next, queued)
+	s.audit(r, "", "project.rollback", "project", project.ID, map[string]string{"project_deployment_id": next.ID, "source": rollout.ID})
+	writeJSON(w, http.StatusAccepted, view)
 }
 
 func firstNonEmpty(vals ...string) string {

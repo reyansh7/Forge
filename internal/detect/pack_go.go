@@ -86,7 +86,10 @@ func directoryHasMain(dir string) bool {
 		if ent.IsDir() || !strings.HasSuffix(strings.ToLower(ent.Name()), ".go") {
 			continue
 		}
-		body, err := os.ReadFile(filepath.Join(dir, ent.Name()))
+		// Only the package clause is needed, and it is at the top of a
+		// normal Go file. A multi-gigabyte file named *.go must not be
+		// loaded to answer "is this package main".
+		body, err := readFilePrefix(filepath.Join(dir, ent.Name()), goPackageScanBytes)
 		if err != nil {
 			continue
 		}
@@ -95,6 +98,26 @@ func directoryHasMain(dir string) bool {
 		}
 	}
 	return false
+}
+
+// goPackageScanBytes is the prefix read to find `package main`.
+// A package clause that begins only after this many bytes is not
+// detected. That bound is the protection against reading a data file
+// that happens to end in .go.
+const goPackageScanBytes = 64 << 10
+
+func readFilePrefix(path string, max int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, max)
+	n, err := f.Read(buf)
+	if n == 0 && err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
 }
 
 func goFileIsMain(src string) bool {

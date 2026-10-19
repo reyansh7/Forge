@@ -46,6 +46,18 @@ func (c *Client) snapshotDir(ctx context.Context, token, repo, ref, rel, dest st
 		}
 	}
 	if depth == 2 {
+		// Files in this directory were saved above. Do not open ordinary
+		// children (apps/web/src is source). Still open cmd/, one step
+		// shallower, so apps/api/cmd/worker/main.go is in the plan tree.
+		// The root already uses the same exception.
+		for _, ent := range entries {
+			if ent.Type != "dir" || ent.Name != "cmd" || skipSnapshotDir(ent.Name) {
+				continue
+			}
+			if err := c.snapshotDir(ctx, token, repo, ref, ent.Path, dest, 1, n); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	for _, ent := range entries {
@@ -68,7 +80,7 @@ func snapshotFile(name string) bool {
 	switch name {
 	case "Dockerfile", "package.json", "go.mod", "requirements.txt", "pyproject.toml", "Pipfile",
 		"Cargo.toml", "Gemfile", "composer.json", "pom.xml", "build.gradle", "build.gradle.kts",
-		"CMakeLists.txt", "Makefile", "Procfile", "forge.json", "index.html", "main.go", "app.py",
+		"CMakeLists.txt", "Makefile", "Procfile", "forge.json", "forge.yaml", "docker-compose.yml", "index.html", "main.go", "app.py",
 		"main.py", "wsgi.py", "api.py":
 		return true
 	default:

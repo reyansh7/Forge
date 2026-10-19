@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -222,5 +223,162 @@ func TestNodeDevStartIsNotProduction(t *testing.T) {
 	}
 	if isDevStartScript("node server.js") || isDevStartScript("next start") {
 		t.Fatal("prod scripts")
+	}
+}
+
+func TestTreeNodeWithoutStartFailsBeforeBuild(t *testing.T) {
+	dir := t.TempDir()
+	// Same shape as Resume Analyzer's root manifest: dependencies, no
+	// start script, no framework. main must not become the command.
+	write(t, filepath.Join(dir, "package.json"), `{
+		"main": "server.js",
+		"dependencies": {"mongodb": "^7.1.1", "sharp": "^0.34.5"}
+	}`)
+	_, err := Tree(dir)
+	if err == nil {
+		t.Fatal("expected a detecting error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"Node.js", "start script", "forge.json", "Procfile"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "server.js") {
+		t.Fatalf("invented a command from main: %s", msg)
+	}
+}
+
+func TestTreeNodeWhitespaceStartIsMissing(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "package.json"), `{"scripts":{"start":"   "}}`)
+	_, err := Tree(dir)
+	if err == nil || !strings.Contains(err.Error(), "start script") {
+		t.Fatal(err)
+	}
+}
+
+func TestTreeNodeDevStartIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "package.json"), `{"scripts":{"start":"vite"}}`)
+	_, err := Tree(dir)
+	if err == nil || !strings.Contains(err.Error(), "start script") {
+		t.Fatal(err)
+	}
+}
+
+func TestTreeNodeStartScriptUsesNpmStart(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "package.json"), `{"scripts":{"start":"node server.js"}}`)
+	write(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":3}`)
+	got, err := Tree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != KindNode || got.Runtime != RuntimeServer {
+		t.Fatalf("got %+v", got)
+	}
+	if !strings.Contains(got.GeneratedDockerfile, "npm ci") || !strings.Contains(got.GeneratedDockerfile, `CMD ["npm","start"]`) {
+		t.Fatal(got.GeneratedDockerfile)
+	}
+}
+
+func TestTreeNodeYarnStart(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "package.json"), `{"scripts":{"start":"node server.js"}}`)
+	write(t, filepath.Join(dir, "yarn.lock"), "# yarn\n")
+	got, err := Tree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.GeneratedDockerfile, `CMD ["yarn","start"]`) {
+		t.Fatal(got.GeneratedDockerfile)
+	}
+}
+
+func TestTreeNodeForgeStartWithoutScript(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "package.json"), `{"dependencies":{"mongodb":"7.0.0"}}`)
+	write(t, filepath.Join(dir, "forge.json"), `{"start":["node","server.js"]}`)
+	got, err := Tree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.GeneratedDockerfile, `CMD ["node","server.js"]`) {
+		t.Fatal(got.GeneratedDockerfile)
+	}
+}
+
+func TestTreeNodeProcfileWithoutScript(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "package.json"), `{"dependencies":{"mongodb":"7.0.0"}}`)
+	write(t, filepath.Join(dir, "Procfile"), "web: node server.js\n")
+	got, err := Tree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.GeneratedDockerfile, `CMD ["node","server.js"]`) {
+		t.Fatal(got.GeneratedDockerfile)
+	}
+}
+
+func TestTreeNodeStaticRuntimeOverride(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "package.json"), `{"dependencies":{"mongodb":"7.0.0"}}`)
+	write(t, filepath.Join(dir, "forge.json"), `{"runtime":"static","output":"dist"}`)
+	got, err := Tree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Runtime != RuntimeStatic || !strings.Contains(got.GeneratedDockerfile, "nginx:1.27-alpine") {
+		t.Fatalf("runtime=%q dockerfile=%s", got.Runtime, got.GeneratedDockerfile)
+	}
+}
+
+func TestTreeNestBuildWithoutStart(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "package.json"), `{
+		"dependencies": {"@nestjs/core": "10.0.0"},
+		"scripts": {"build": "nest build"}
+	}`)
+	got, err := Tree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Framework != "nest" || !strings.Contains(got.GeneratedDockerfile, `CMD ["node","dist/main.js"]`) {
+		t.Fatalf("framework=%q dockerfile=%s", got.Framework, got.GeneratedDockerfile)
+	}
+}
+
+func TestDirectoryHasMainDoesNotReadPastPrefix(t *testing.T) {
+	dir := t.TempDir()
+	early := []byte("package main\n")
+	early = append(early, bytesRepeat('x', 1024*1024)...)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), early, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !directoryHasMain(dir) {
+		t.Fatal("package main in the prefix was missed")
+	}
+	lateDir := t.TempDir()
+	late := append(bytesRepeat('y', goPackageScanBytes+10), []byte("\npackage main\n")...)
+	if err := os.WriteFile(filepath.Join(lateDir, "late.go"), late, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if directoryHasMain(lateDir) {
+		t.Fatal("package clause past the scan cap was read")
+	}
+}
+
+func bytesRepeat(b byte, n int) []byte {
+	return []byte(strings.Repeat(string(b), n))
+}
+
+func TestTreeExpressWithoutStartFails(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "package.json"), `{"dependencies":{"express":"4.18.0"},"scripts":{"build":"tsc"}}`)
+	_, err := Tree(dir)
+	if err == nil || !strings.Contains(err.Error(), "express") || !strings.Contains(err.Error(), "start script") {
+		t.Fatal(err)
 	}
 }

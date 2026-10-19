@@ -78,14 +78,14 @@ func (HostFetcher) FetchRef(ctx context.Context, repositoryURL, dest, ref, token
 			plain := exec.CommandContext(ctx, "git", args...)
 			plain.Env = gitSafeEnv()
 			if _, perr := plain.CombinedOutput(); perr == nil {
-				return nil
+				return refuseIncompleteCheckout(dest)
 			}
 		}
 	}
 	if err != nil {
 		return fmt.Errorf("fetch: git clone failed: %s", truncate(string(out), 300))
 	}
-	return nil
+	return refuseIncompleteCheckout(dest)
 }
 
 // gitAskedForCredentials is Git's message when GIT_TERMINAL_PROMPT=0
@@ -121,7 +121,7 @@ func fetchSHA(ctx context.Context, env []string, repositoryURL, dest, sha string
 	if out, err := checkout.CombinedOutput(); err != nil {
 		return fmt.Errorf("fetch: git checkout failed: %s", truncate(string(out), 300))
 	}
-	return nil
+	return refuseIncompleteCheckout(dest)
 }
 
 func gitAuthEnv(token string) []string {

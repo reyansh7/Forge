@@ -9,31 +9,27 @@ import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
-  connectApplicationGitHub,
   createApplicationDeployment,
   createDomain,
   createLink,
   createVolume,
   deleteApplication,
   deleteDomain,
-  disconnectApplicationGitHub,
-  disconnectGitHub,
   deleteEnv,
   deleteLink,
   deleteVolume,
   getApplication,
-  getApplicationGitHub,
   getApplicationHealth,
   getApplicationLogs,
   getDeployment,
-  getGitHubStatus,
   isBundledSample,
   listApplicationDeployments,
   listApplications,
   listDomains,
   listEnv,
-  listGitHubRepos,
+  listEnvTemplates,
   listLinks,
+  listNodes,
   listVolumes,
   mergeEnv,
   parseDotEnvDetailed,
@@ -49,23 +45,32 @@ import {
   type Application,
   type DeployEnvironment,
   type Deployment,
+  type EnvTemplate,
   type EnvVar,
   type AppDomain,
-  type ApplicationGitHub,
   type AppVolume,
-  type GitHubRepo,
-  type GitHubStatus,
   type ServiceLink,
 } from "../../api";
 import { EnvTemplates } from "../../env-templates";
-import { formatDuration, isInProgress, pillClass, statusLabel, STAGES, stepClass, when } from "../../status";
+import {
+  elapsedSince,
+  formatDuration,
+  isInProgress,
+  pillClass,
+  stageExplanation,
+  statusLabel,
+  STAGES,
+  stepClass,
+  when,
+  workerUnresponsiveNote,
+} from "../../status";
+import type { WorkerNode } from "../../api";
 
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "deployments", label: "Deployments" },
   { id: "logs", label: "Logs" },
   { id: "environment", label: "Environment" },
-  { id: "github", label: "GitHub" },
   { id: "settings", label: "Settings" },
   { id: "advanced", label: "Advanced" },
 ] as const;
@@ -93,16 +98,19 @@ export default function ApplicationPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [app, setApp] = useState<Application | null>(null);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [nodes, setNodes] = useState<WorkerNode[]>([]);
+  const [now, setNow] = useState(() => Date.now());
+  const [envFilter, setEnvFilter] = useState<"all" | DeployEnvironment>("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [rangeFilter, setRangeFilter] = useState<"all" | "day" | "week" | "month">("all");
+  const [historyLimit, setHistoryLimit] = useState(25);
+  const [logQuery, setLogQuery] = useState("");
   const [env, setEnv] = useState<EnvVar[]>([]);
+  const [repoEnv, setRepoEnv] = useState<EnvTemplate[] | null>(null);
   const [links, setLinks] = useState<ServiceLink[]>([]);
   const [volumes, setVolumes] = useState<AppVolume[]>([]);
   const [domains, setDomains] = useState<AppDomain[]>([]);
   const [domainHost, setDomainHost] = useState("");
-  const [githubStatus, setGithubStatus] = useState<GitHubStatus | null>(null);
-  const [githubBinding, setGithubBinding] = useState<ApplicationGitHub | null>(null);
-  const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
-  const [githubRepo, setGithubRepo] = useState("");
-  const [githubBranch, setGithubBranch] = useState("main");
   const [siblings, setSiblings] = useState<Application[]>([]);
   const [linkTarget, setLinkTarget] = useState("");
   const [linkKey, setLinkKey] = useState("VITE_API_URL");
@@ -116,6 +124,10 @@ export default function ApplicationPage() {
   const [rootDirectory, setRootDirectory] = useState(".");
   const [healthPath, setHealthPath] = useState("/");
   const [localHost, setLocalHost] = useState("");
+  const [memoryMB, setMemoryMB] = useState("");
+  const [cpuMillis, setCpuMillis] = useState("");
+  const [pidsLimit, setPidsLimit] = useState("");
+  const [healthTimeout, setHealthTimeout] = useState("");
   const [envKey, setEnvKey] = useState("");
   const [envValue, setEnvValue] = useState("");
   const [envBulk, setEnvBulk] = useState("");
@@ -139,39 +151,15 @@ export default function ApplicationPage() {
     setRootDirectory(a.root_directory || ".");
     setHealthPath(a.health_path || "/");
     setLocalHost(a.local_host || "");
+    setMemoryMB(a.memory_mb ? String(a.memory_mb) : "");
+    setCpuMillis(a.cpu_millis ? String(a.cpu_millis) : "");
+    setPidsLimit(a.pids_limit ? String(a.pids_limit) : "");
+    setHealthTimeout(a.health_timeout_seconds ? String(a.health_timeout_seconds) : "");
     setDeployments(list);
     setEnv(vars);
     setLinks(svc);
     setVolumes(vols);
     setDomains(doms);
-    try {
-      const [st, bind] = await Promise.all([getGitHubStatus(), getApplicationGitHub(id)]);
-      setGithubStatus(st);
-      setGithubBinding(bind);
-      if (bind.repo) {
-        setGithubRepo(bind.repo);
-      }
-      if (bind.branch) {
-        setGithubBranch(bind.branch);
-      }
-      if (st.connected) {
-        try {
-          const repos = await listGitHubRepos();
-          setGithubRepos(repos);
-          if (!bind.repo && repos[0]) {
-            setGithubRepo(repos[0].full_name);
-            setGithubBranch(repos[0].default_branch || "main");
-          }
-        } catch {
-          setGithubRepos([]);
-        }
-      } else {
-        setGithubRepos([]);
-      }
-    } catch {
-      setGithubStatus(null);
-      setGithubBinding(null);
-    }
     try {
       const others = (await listApplications(a.project_id)).filter((x) => x.id !== a.id);
       setSiblings(others);
@@ -190,6 +178,18 @@ export default function ApplicationPage() {
 
   useEffect(() => {
     let cancelled = false;
+    setRepoEnv(null);
+    void listEnvTemplates(id)
+      .then((list) => {
+        if (!cancelled) {
+          setRepoEnv(list);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRepoEnv([]);
+        }
+      });
     void (async () => {
       try {
         await refresh();
@@ -248,6 +248,39 @@ export default function ApplicationPage() {
     return () => window.clearInterval(t);
   }, [deployments, id, slot]);
 
+  const slotPending = deployments.some((d) => isInProgress(d.status) && slotOf(d) === slot);
+
+  useEffect(() => {
+    if (!slotPending) {
+      return;
+    }
+    const tick = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(tick);
+  }, [slotPending]);
+
+  useEffect(() => {
+    if (!slotPending) {
+      return;
+    }
+    let alive = true;
+    async function loadNodes() {
+      try {
+        const list = await listNodes();
+        if (alive) {
+          setNodes(list);
+        }
+      } catch {
+        // Heartbeat context is optional. A missing node list is not a dead worker.
+      }
+    }
+    void loadNodes();
+    const t = window.setInterval(() => void loadNodes(), 10000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [slotPending]);
+
   const liveId = deployments.find((d) => d.status === "live" && slotOf(d) === slot)?.id ?? "";
 
   useEffect(() => {
@@ -299,6 +332,10 @@ export default function ApplicationPage() {
         root_directory: rootDirectory,
         health_path: healthPath,
         local_host: localHost,
+        memory_mb: memoryMB === "" ? 0 : Number(memoryMB),
+        cpu_millis: cpuMillis === "" ? 0 : Number(cpuMillis),
+        pids_limit: pidsLimit === "" ? 0 : Number(pidsLimit),
+        health_timeout_seconds: healthTimeout === "" ? 0 : Number(healthTimeout),
       });
       setApp(next);
     } catch (err) {
@@ -338,6 +375,12 @@ export default function ApplicationPage() {
   }
 
   async function onStop() {
+    const extra = inProgress
+      ? " This also fails the attempt that is still running."
+      : "";
+    if (!window.confirm(`Stop the ${slot} environment? The serving release goes offline.${extra} Images and volumes are kept.`)) {
+      return;
+    }
     setBusy("stop");
     setError("");
     try {
@@ -360,6 +403,13 @@ export default function ApplicationPage() {
   }
 
   async function onRestart() {
+    if (
+      !window.confirm(
+        `Restart ${slot}? This queues a new deploy. The serving container stays up until the new one passes its health check.`,
+      )
+    ) {
+      return;
+    }
     setBusy("restart");
     setError("");
     try {
@@ -479,46 +529,6 @@ export default function ApplicationPage() {
     }
   }
 
-  async function onConnectGitHubRepo(e: FormEvent) {
-    e.preventDefault();
-    setBusy("github-repo");
-    setError("");
-    try {
-      await connectApplicationGitHub(id, githubRepo, githubBranch, slot);
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "github connect failed");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function onDisconnectGitHubRepo() {
-    setBusy("github-unrepo");
-    setError("");
-    try {
-      await disconnectApplicationGitHub(id);
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "github disconnect failed");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function onDisconnectGitHubAccount() {
-    setBusy("github-account");
-    setError("");
-    try {
-      await disconnectGitHub();
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "github disconnect failed");
-    } finally {
-      setBusy("");
-    }
-  }
-
   async function onUnlink(linkId: string) {
     setBusy("unlink");
     setError("");
@@ -593,6 +603,13 @@ export default function ApplicationPage() {
   }
 
   async function onRollback(sourceId: string) {
+    if (
+      !window.confirm(
+        "Roll back to this image? This queues a new attempt that skips the build. Traffic switches only after the health check passes.",
+      )
+    ) {
+      return;
+    }
     setBusy("rollback");
     setError("");
     try {
@@ -651,14 +668,33 @@ export default function ApplicationPage() {
       : publicURL;
   const pending = deployments.find((d) => isInProgress(d.status) && slotOf(d) === slot);
   const healthLabel = health?.status ?? (liveRow ? "unknown" : "stopped");
-  const slotLabel = liveRow ? (running ? "Live" : healthLabel) : "Offline";
+  const slotLabel = liveRow ? (running ? "Serving" : healthLabel) : "Not serving";
   const deployStatus = pending
     ? statusLabel(pending.status)
     : latest
       ? statusLabel(latest.status)
       : "No deployments";
+  const attemptNode = pending?.node_id ? nodes.find((n) => n.id === pending.node_id) ?? null : null;
+  const attemptWorkerNote = pending ? workerUnresponsiveNote(attemptNode?.status, attemptNode?.name) : null;
   const selectedEnv = selected ? slotOf(selected) : slot;
   const selectedPending = deployments.some((d) => isInProgress(d.status) && slotOf(d) === selectedEnv);
+  const rangeMs = rangeFilter === "day" ? 86400000 : rangeFilter === "week" ? 7 * 86400000 : rangeFilter === "month" ? 30 * 86400000 : 0;
+  const filteredDeployments = deployments.filter((d) => {
+    if (envFilter !== "all" && slotOf(d) !== envFilter) {
+      return false;
+    }
+    if (statusFilter !== "all" && d.status !== statusFilter) {
+      return false;
+    }
+    if (rangeMs > 0) {
+      const started = Date.parse(d.created_at);
+      if (!Number.isNaN(started) && now - started > rangeMs) {
+        return false;
+      }
+    }
+    return true;
+  });
+  const visibleDeployments = filteredDeployments.slice(0, historyLimit);
 
   return (
     <>
@@ -675,18 +711,20 @@ export default function ApplicationPage() {
         <div>
           <h1>{app?.name ?? "Application"}</h1>
           <p className="page-head-meta">
-            {liveRow && running ? (
-              <span className="pill live">Live</span>
-            ) : pending ? (
-              <span className={pillClass(pending.status)}>{statusLabel(pending.status)}</span>
-            ) : liveRow ? (
-              <span className="pill pending">{statusLabel(health?.status ?? "unknown")}</span>
-            ) : latest ? (
-              <span className={pillClass(latest.status)}>{statusLabel(latest.status)}</span>
-            ) : (
-              <span className="pill stopped">Offline</span>
-            )}
-            <span>{app?.repository_url}</span>
+            <span className={liveRow && running ? "pill live" : "pill stopped"}>
+              {liveRow && running ? "Serving" : liveRow ? "Serving · check failed" : "Not serving"}
+            </span>
+            {pending ? (
+              <span className={pillClass(pending.status)}>
+                Attempt · {statusLabel(pending.status)}
+                {elapsedSince(pending.created_at, now) ? ` · ${elapsedSince(pending.created_at, now)}` : ""}
+              </span>
+            ) : latest && latest.status !== "live" ? (
+              <span className={pillClass(latest.status)}>Latest attempt · {statusLabel(latest.status)}</span>
+            ) : null}
+            <span className="repo-url" title={app?.repository_url}>
+              {app?.repository_url}
+            </span>
             {app?.platform_url ? (
               <a href={app.platform_url} target="_blank" rel="noreferrer">
                 {app.platform_url.replace(/\/$/, "")}
@@ -712,12 +750,17 @@ export default function ApplicationPage() {
             </select>
           </label>
           <button className="btn-primary" type="button" onClick={onDeploy} disabled={!!busy || deployBlocked}>
-            {busy === "deploy" ? "Queueing…" : liveRow && running ? `Redeploy ${slot}` : `Deploy ${slot}`}
+            {busy === "deploy" ? "Queueing…" : deployBlocked ? "Deploy in progress" : liveRow ? `Redeploy ${slot}` : `Deploy ${slot}`}
           </button>
-          <button className="btn-ghost" type="button" onClick={onRestart} disabled={!!busy || !liveRow}>
+          {liveRow && running && visitURL ? (
+            <a className="btn btn-ghost" href={visitURL} target="_blank" rel="noreferrer">
+              Open
+            </a>
+          ) : null}
+          <button className="btn-ghost" type="button" onClick={onRestart} disabled={!!busy || !liveRow || inProgress}>
             {busy === "restart" ? "Restarting…" : "Restart"}
           </button>
-          <button className="btn-ghost" type="button" onClick={onStop} disabled={!!busy}>
+          <button className="btn-danger" type="button" onClick={onStop} disabled={!!busy || (!liveRow && !pending)}>
             {busy === "stop" ? "Stopping…" : "Stop"}
           </button>
         </div>
@@ -729,8 +772,20 @@ export default function ApplicationPage() {
             ? `This ${slot} environment is live. Redeploy starts a new container beside it and switches traffic after health checks. Production and preview are isolated.`
             : "github.com/example and forge://hello use the bundled sample (no GitHub clone). Keep the worker running, then Deploy."}
         </div>
+      ) : pending && liveRow ? (
+        <div className="banner">
+          A new {slot} attempt is {statusLabel(pending.status).toLowerCase()}. The current release keeps serving until that attempt passes its health check.
+        </div>
+      ) : pending ? (
+        <div className="banner">
+          Nothing is serving in {slot}. This attempt is {statusLabel(pending.status).toLowerCase()} and has not passed a health check.
+        </div>
+      ) : latest && latest.status === "failed" && liveRow ? (
+        <div className="banner">The latest {slot} attempt failed. The previous healthy release is still serving.</div>
+      ) : latest && latest.status === "failed" ? (
+        <div className="banner">The latest {slot} attempt failed. Nothing is serving in this environment.</div>
       ) : liveRow && running ? (
-        <div className="banner">This {slot} environment is live. Redeploy rolls a new container in beside it; a failed health check keeps the current version.</div>
+        <div className="banner">This {slot} environment is serving. Redeploy starts a new attempt beside it. A failed health check keeps this release.</div>
       ) : null}
 
       {error ? <p className="error">{error}</p> : null}
@@ -788,37 +843,48 @@ export default function ApplicationPage() {
           </div>
 
           <div className="card">
-            <h2>Latest deployment</h2>
-            {latest ? (
+            <h2>{pending ? "Current attempt" : "Latest attempt"}</h2>
+            {(pending ?? latest) ? (
               <>
                 <div className="deploy-top">
-                  <span className={pillClass(latest.status)}>{statusLabel(latest.status)}</span>
+                  <span className={pillClass((pending ?? latest)!.status)}>{statusLabel((pending ?? latest)!.status)}</span>
                   <span className="deploy-meta" style={{ margin: 0 }}>
-                    {when(latest.created_at)}
-                    {latest.rollback_of ? " · Rollback" : ""}
+                    Started {when((pending ?? latest)!.created_at)}
+                    {isInProgress((pending ?? latest)!.status)
+                      ? ` · elapsed ${elapsedSince((pending ?? latest)!.created_at, now) || "under 1 ms"}`
+                      : (pending ?? latest)!.duration_ms
+                        ? ` · ${formatDuration((pending ?? latest)!.duration_ms)}`
+                        : ""}
+                    {(pending ?? latest)!.updated_at ? ` · updated ${when((pending ?? latest)!.updated_at)}` : ""}
                   </span>
                 </div>
                 <div className="pipeline" aria-label="deployment stages">
                   {STAGES.map((stage) => (
-                    <span key={stage} className={stepClass(stage, latest)}>
+                    <span key={stage} className={stepClass(stage, (pending ?? latest)!)}>
                       {statusLabel(stage)}
                     </span>
                   ))}
                 </div>
-                {latest.error_message ? <div className="err-box">{latest.error_message}</div> : null}
+                <p className="hint">{stageExplanation(pending ?? latest!)}</p>
+                {attemptWorkerNote ? <p className="hint">{attemptWorkerNote}</p> : null}
+                {(pending ?? latest)!.error_message ? <div className="err-box">{(pending ?? latest)!.error_message}</div> : null}
                 <div className="actions-row">
                   <button
                     className="btn-ghost"
                     type="button"
                     onClick={() => {
-                      setSelectedId(latest.id);
+                      const focus = pending ?? latest;
+                      if (!focus) {
+                        return;
+                      }
+                      setSelectedId(focus.id);
                       setTab("deployments");
                     }}
                   >
                     View details
                   </button>
-                  {latest.status === "live" && (visitURL || latest.public_url) ? (
-                    <a className="btn btn-ghost" href={visitURL || latest.public_url} target="_blank" rel="noreferrer">
+                  {liveRow && (visitURL || liveRow.public_url) ? (
+                    <a className="btn btn-ghost" href={visitURL || liveRow.public_url} target="_blank" rel="noreferrer">
                       Open app
                     </a>
                   ) : null}
@@ -828,6 +894,15 @@ export default function ApplicationPage() {
               <p className="empty">No deployments yet. Deploy to start the first build.</p>
             )}
           </div>
+
+          {liveRow && pending && liveRow.id !== pending.id ? (
+            <div className="card">
+              <h2>Serving release</h2>
+              <p className="hint">
+                Started {when(liveRow.created_at)}. This {slot} release is still the one that can receive traffic. The attempt above replaces it only after a passing health check.
+              </p>
+            </div>
+          ) : null}
 
           <div className="card">
             <h2>Recent deployments</h2>
@@ -866,9 +941,44 @@ export default function ApplicationPage() {
             <p className="empty">None yet. Deploy queues work for the worker process.</p>
           </div>
         ) : (
+          <div className="stack">
+            <div className="filter-bar">
+              <label>
+                Environment
+                <select value={envFilter} onChange={(e) => setEnvFilter(e.target.value === "preview" || e.target.value === "production" ? e.target.value : "all")}>
+                  <option value="all">All</option>
+                  <option value="production">Production</option>
+                  <option value="preview">Preview</option>
+                </select>
+              </label>
+              <label>
+                Status
+                <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                  <option value="all">All</option>
+                  {[...STAGES, "failed", "stopped"].map((s) => (
+                    <option key={s} value={s}>
+                      {statusLabel(s)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Started
+                <select
+                  value={rangeFilter}
+                  onChange={(e) => setRangeFilter(e.target.value === "day" || e.target.value === "week" || e.target.value === "month" ? e.target.value : "all")}
+                >
+                  <option value="all">Any time</option>
+                  <option value="day">Last 24 hours</option>
+                  <option value="week">Last 7 days</option>
+                  <option value="month">Last 30 days</option>
+                </select>
+              </label>
+            </div>
           <div className="deploy-split">
             <div className="deploy-list">
-              {deployments.map((d) => (
+              {visibleDeployments.length === 0 ? <p className="empty">No deployments match these filters.</p> : null}
+              {visibleDeployments.map((d) => (
                 <button
                   key={d.id}
                   className="deploy-row"
@@ -882,15 +992,32 @@ export default function ApplicationPage() {
                     {slotOf(d) === "preview" ? " · Preview" : " · Production"}
                     {d.rollback_of ? " · Rollback" : ""}
                     {d.commit_sha ? ` · ${d.commit_sha.slice(0, 7)}` : ""}
+                    {d.error_message ? ` · ${d.error_message.slice(0, 80)}` : ""}
                   </span>
                 </button>
               ))}
+              {filteredDeployments.length > visibleDeployments.length ? (
+                <button className="btn-ghost" type="button" onClick={() => setHistoryLimit((n) => n + 25)}>
+                  Show older
+                </button>
+              ) : null}
             </div>
             <div className="deploy-detail">
               {selected ? (
                 <DeploymentDetail
                   d={selected}
                   busy={busy}
+                  now={now}
+                  logQuery={logQuery}
+                  onLogQuery={setLogQuery}
+                  workerNote={
+                    isInProgress(selected.status)
+                      ? workerUnresponsiveNote(
+                          nodes.find((n) => n.id === selected.node_id)?.status,
+                          nodes.find((n) => n.id === selected.node_id)?.name,
+                        )
+                      : null
+                  }
                   canRollback={!!selected.image_name && !selectedPending}
                   onRollback={onRollback}
                   onRequeue={onRequeue}
@@ -899,6 +1026,7 @@ export default function ApplicationPage() {
                 <p className="empty">Select a deployment to see build status and logs.</p>
               )}
             </div>
+          </div>
           </div>
         )
       ) : null}
@@ -936,12 +1064,12 @@ export default function ApplicationPage() {
             requires a new deploy, not just a running container. PORT and reserved
             Forge keys are rejected.
           </p>
-          <EnvTemplates applicationId={id} />
-          {env.length === 0 ? (
+          <EnvTemplates applicationId={id} templates={repoEnv} onSaved={() => void refresh()} />
+          {repoEnv === null ? null : env.length === 0 && repoEnv.length === 0 ? (
             <p className="empty" style={{ marginTop: "0.85rem" }}>
               No variables yet.
             </p>
-          ) : (
+          ) : env.length === 0 ? null : (
             <table className="env-table" style={{ marginTop: "0.75rem" }}>
               <thead>
                 <tr>
@@ -967,6 +1095,8 @@ export default function ApplicationPage() {
               </tbody>
             </table>
           )}
+          {repoEnv === null ? null : (
+          <>
           <form onSubmit={onEnv} style={{ marginTop: "1rem" }}>
             <div className="env-row">
               <input
@@ -1052,6 +1182,8 @@ export default function ApplicationPage() {
               </button>
             </div>
           </form>
+          </>
+          )}
         </div>
       ) : null}
 
@@ -1249,107 +1381,6 @@ export default function ApplicationPage() {
         </div>
       ) : null}
 
-      {tab === "github" ? (
-        <div className="card">
-          <h2>GitHub</h2>
-          <p className="hint" style={{ marginTop: 0 }}>
-            Pick a repository and branch, then press Deploy. A later push to that branch
-            deploys the same way once Forge is reachable from the internet.
-          </p>
-          {!githubStatus?.configured ? (
-            <p className="empty">GitHub OAuth is not configured on this API.</p>
-          ) : !githubStatus.connected ? (
-            <div className="actions">
-              <a className="btn-primary" href={`/forge-api/integrations/github/start?return_to=/applications/${id}`}>
-                Connect GitHub
-              </a>
-            </div>
-          ) : (
-            <>
-              <p>
-                Connected as <strong>{githubStatus.login}</strong>
-              </p>
-              {githubBinding?.connected ? (
-                <p className="empty">
-                  {githubBinding.repo}@{githubBinding.branch} → {githubBinding.environment}
-                </p>
-              ) : (
-                <p className="empty">No repository connected yet.</p>
-              )}
-              {githubBinding?.warning ? <p className="hint">{githubBinding.warning}</p> : null}
-              <form onSubmit={(e) => void onConnectGitHubRepo(e)} style={{ marginTop: "1rem" }}>
-                <div className="form-grid">
-                  <div>
-                    <label htmlFor="gh-repo">Repository</label>
-                    {githubRepos.length > 0 ? (
-                      <select
-                        id="gh-repo"
-                        value={githubRepo}
-                        onChange={(e) => {
-                          const name = e.target.value;
-                          setGithubRepo(name);
-                          const found = githubRepos.find((r) => r.full_name === name);
-                          if (found?.default_branch) {
-                            setGithubBranch(found.default_branch);
-                          }
-                        }}
-                      >
-                        {githubRepos.map((r) => (
-                          <option key={r.full_name} value={r.full_name}>
-                            {r.full_name}
-                            {r.private ? " (private)" : ""}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        id="gh-repo"
-                        value={githubRepo}
-                        onChange={(e) => setGithubRepo(e.target.value)}
-                        placeholder="owner/name"
-                      />
-                    )}
-                  </div>
-                  <div>
-                    <label htmlFor="gh-branch">Branch</label>
-                    <input
-                      id="gh-branch"
-                      value={githubBranch}
-                      onChange={(e) => setGithubBranch(e.target.value)}
-                      placeholder="main"
-                    />
-                  </div>
-                </div>
-                <p className="hint">Deploys land in the selected environment ({slot}).</p>
-                <div className="actions" style={{ marginTop: "0.75rem" }}>
-                  <button className="btn-primary" type="submit" disabled={!!busy || !githubRepo}>
-                    {busy === "github-repo" ? "Saving…" : "Save repository"}
-                  </button>
-                  {githubBinding?.connected ? (
-                    <button
-                      className="btn-ghost"
-                      type="button"
-                      onClick={() => void onDisconnectGitHubRepo()}
-                      disabled={!!busy}
-                    >
-                      {busy === "github-unrepo" ? "Removing…" : "Disconnect repo"}
-                    </button>
-                  ) : null}
-                  <button
-                    className="btn-ghost"
-                    type="button"
-                    onClick={() => void onDisconnectGitHubAccount()}
-                    disabled={!!busy}
-                  >
-                    {busy === "github-account" ? "Disconnecting…" : "Disconnect GitHub"}
-                  </button>
-                </div>
-              </form>
-            </>
-          )}
-        </div>
-      ) : null}
-
       {tab === "settings" ? (
         <form className="card" onSubmit={onSave}>
           <h2>Settings</h2>
@@ -1396,7 +1427,53 @@ export default function ApplicationPage() {
                 placeholder="myapp"
               />
             </div>
+            <div>
+              <label htmlFor="memory-mb">Memory (MiB)</label>
+              <input
+                id="memory-mb"
+                inputMode="numeric"
+                value={memoryMB}
+                onChange={(e) => setMemoryMB(e.target.value)}
+                placeholder="256"
+              />
+            </div>
+            <div>
+              <label htmlFor="cpu-millis">CPU (milli-CPU)</label>
+              <input
+                id="cpu-millis"
+                inputMode="numeric"
+                value={cpuMillis}
+                onChange={(e) => setCpuMillis(e.target.value)}
+                placeholder="500"
+              />
+            </div>
+            <div>
+              <label htmlFor="pids-limit">Process limit</label>
+              <input
+                id="pids-limit"
+                inputMode="numeric"
+                value={pidsLimit}
+                onChange={(e) => setPidsLimit(e.target.value)}
+                placeholder="256"
+              />
+            </div>
+            <div>
+              <label htmlFor="health-timeout">Health timeout (seconds)</label>
+              <input
+                id="health-timeout"
+                inputMode="numeric"
+                value={healthTimeout}
+                onChange={(e) => setHealthTimeout(e.target.value)}
+                placeholder="45"
+              />
+            </div>
           </div>
+          <p className="hint">
+            Blank keeps the current defaults: 256 MiB, 0.5 CPU, 256 processes, and a 45 second
+            readiness check. Allowed ranges are 64–2048 MiB, 100–2000 milli-CPU, 32–1024 processes,
+            and 5–180 seconds. A container that exits before that check is a startup failure and
+            does not replace the last healthy release.
+          </p>
           <div className="actions-row" style={{ marginTop: "1rem" }}>
             <button className="btn-primary" type="submit" disabled={!!busy}>
               {busy === "save" ? "Saving…" : "Save settings"}
@@ -1420,16 +1497,31 @@ export default function ApplicationPage() {
 function DeploymentDetail({
   d,
   busy,
+  now,
+  logQuery,
+  onLogQuery,
+  workerNote,
   canRollback,
   onRollback,
   onRequeue,
 }: {
   d: Deployment;
   busy: string;
+  now: number;
+  logQuery: string;
+  onLogQuery: (value: string) => void;
+  workerNote: string | null;
   canRollback: boolean;
   onRollback: (id: string) => void;
   onRequeue: (id: string) => void;
 }) {
+  const logText = d.build_log ?? "";
+  const shownLog = logQuery.trim()
+    ? logText
+        .split("\n")
+        .filter((line) => line.toLowerCase().includes(logQuery.trim().toLowerCase()))
+        .join("\n")
+    : logText;
   return (
     <>
       <div className="deploy-top">
@@ -1447,7 +1539,7 @@ function DeploymentDetail({
           ) : null}
           {canRollback ? (
             <button
-              className="btn-primary"
+              className={d.status === "failed" ? "btn-primary" : "btn-ghost"}
               type="button"
               disabled={!!busy}
               onClick={() => onRollback(d.id)}
@@ -1457,8 +1549,15 @@ function DeploymentDetail({
           ) : null}
         </div>
       </div>
+      {logText.includes("build cache hit") ? (
+        <p className="hint">Build cache hit. Docker build was skipped. Health checks still run before traffic switches.</p>
+      ) : logText.includes("build cache miss") ? (
+        <p className="hint">Build cache miss. This attempt built a new image. A later attempt with the same inputs can reuse it.</p>
+      ) : null}
       <p className="deploy-meta">
-        {when(d.created_at)}
+        Started {when(d.created_at)}
+        {isInProgress(d.status) ? ` · elapsed ${elapsedSince(d.created_at, now) || "under 1 ms"}` : ""}
+        {d.updated_at ? ` · updated ${when(d.updated_at)}` : ""}
         {d.duration_ms ? ` · ${formatDuration(d.duration_ms)}` : ""}
         {d.environment ? ` · ${d.environment}` : ""}
         {d.failed_stage ? ` · failed at ${d.failed_stage}` : ""}
@@ -1474,22 +1573,11 @@ function DeploymentDetail({
           </span>
         ))}
       </div>
+      {stageExplanation(d) ? <p className="hint">{stageExplanation(d)}</p> : null}
+      {workerNote ? <p className="hint">{workerNote}</p> : null}
       {d.status === "queued" ? (
         <p className="hint">
-          Still queued. If Redis restarted, the worker never received this job. Re-queue pushes the same
-          attempt again. An older copy of the job is ignored.
-        </p>
-      ) : null}
-      {d.status === "failed" ? (
-        <p className="hint">
-          Stopped at {d.failed_stage ? statusLabel(d.failed_stage) : "this attempt"}. Deploy starts a new
-          attempt. If the health check never passed, the previous live version is still serving.
-        </p>
-      ) : null}
-      {isInProgress(d.status) && d.status !== "queued" ? (
-        <p className="hint">
-          The worker owns this stage. If that process died, Stop marks the attempt failed so you can Deploy
-          again.
+          Re-queue sends this same attempt again. Use it when the worker never received the job. It does not start a second copy of an attempt that is already running.
         </p>
       ) : null}
       {d.error_message ? <div className="err-box">{d.error_message}</div> : null}
@@ -1519,13 +1607,31 @@ function DeploymentDetail({
           <dd>{d.port_source || "—"}</dd>
         </div>
       </dl>
-      {d.build_log ? (
+      {logText ? (
         <>
           <h2 className="section-gap">Build log</h2>
-          <pre className="log-box">{d.build_log}</pre>
+          <p className="hint">Builder output for this attempt. Application runtime logs are on the Logs tab.</p>
+          <label className="log-filter" htmlFor="log-filter">
+            Filter log lines
+            <input
+              id="log-filter"
+              value={logQuery}
+              onChange={(e) => onLogQuery(e.target.value)}
+              placeholder="error, npm, health"
+            />
+          </label>
+          {shownLog ? <pre className="log-box">{shownLog}</pre> : <p className="empty">No lines match that filter.</p>}
         </>
       ) : (
-        <p className="empty">No build log for this deployment.</p>
+        <p className="empty">
+          {d.status === "failed" && (d.failed_stage === "detecting" || d.failed_stage === "queued")
+            ? "No build log. This attempt failed before Docker started."
+            : isInProgress(d.status) && d.status !== "building"
+              ? "No build log yet. Docker has not produced output for this stage."
+              : d.status === "building"
+                ? "No build log yet. It is saved when the build stage finishes."
+                : "No build log for this deployment."}
+        </p>
       )}
     </>
   );

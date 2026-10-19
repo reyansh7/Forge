@@ -13,6 +13,33 @@ import {
 } from "./api";
 import { CountUp, SplitHeading } from "./split";
 
+function isSampleURL(value: string): boolean {
+  const url = value.trim().toLowerCase();
+  return url === "forge://hello" || url.includes("github.com/example/");
+}
+
+function validateRepositoryURL(value: string): string {
+  const url = value.trim();
+  if (!url || url === "https://") {
+    return "Choose a repository or paste a full https:// Git URL.";
+  }
+  if (url === "forge://hello") {
+    return "";
+  }
+  if (!url.startsWith("https://")) {
+    return "Repository URLs must start with https://. SSH remotes are not accepted.";
+  }
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname || !parsed.hostname.includes(".")) {
+      return "That URL does not include a host name.";
+    }
+  } catch {
+    return "That is not a valid URL.";
+  }
+  return "";
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -23,6 +50,8 @@ export default function HomePage() {
   const [githubLogin, setGithubLogin] = useState("");
   const [repos, setRepos] = useState<GitHubRepo[]>([]);
   const [picked, setPicked] = useState("");
+  const [repoQuery, setRepoQuery] = useState("");
+  const [reposLoading, setReposLoading] = useState(false);
 
   async function refresh() {
     try {
@@ -41,9 +70,12 @@ export default function HomePage() {
           return;
         }
         setGithubLogin(status.login ?? "");
+        setReposLoading(true);
         setRepos(await listGitHubRepos());
       } catch (e) {
-        setError(e instanceof Error ? e.message : "failed to list GitHub repositories");
+        setError(e instanceof Error ? e.message : "Could not load GitHub repositories. You can still paste an https Git URL.");
+      } finally {
+        setReposLoading(false);
       }
     })();
   }, []);
@@ -78,16 +110,26 @@ export default function HomePage() {
 
   async function onCreate(e: FormEvent) {
     e.preventDefault();
-    if (!name.trim()) {
-      setError("Type a project name, or choose one of your GitHub repositories. The grey text in the box is only a hint.");
+    const projectName = name.trim();
+    const repositoryURL = repo.trim();
+    if (!projectName) {
+      setError("Enter a project name, or choose one of your GitHub repositories.");
       return;
     }
-    if (!repo.trim() || repo.trim() === "https://") {
-      setError("Choose a repository or paste a full https:// git URL.");
+    if (projectName.length > 100) {
+      setError("Project names must be 100 characters or fewer.");
       return;
     }
-    await makeProject(name, repo, "custom");
+    const urlError = validateRepositoryURL(repositoryURL);
+    if (urlError) {
+      setError(urlError);
+      return;
+    }
+    await makeProject(projectName, repositoryURL, "custom");
   }
+
+  const visibleRepos = repos.filter((r) => r.full_name.toLowerCase().includes(repoQuery.trim().toLowerCase()));
+  const sampleURL = isSampleURL(repo);
 
   return (
     <>
@@ -121,7 +163,7 @@ export default function HomePage() {
         <div className="card">
           <h2>Quick start</h2>
           <p className="lede" style={{ marginBottom: "0.35rem" }}>
-            Deploys <code>forge://hello</code>. No real git remote required.
+            Creates a project that runs the bundled <code>forge://hello</code> app. It is not a GitHub repository and cannot receive pushes.
           </p>
           <div className="actions">
             <button className="btn-primary" type="button" onClick={onSample} disabled={!!busy}>
@@ -138,22 +180,33 @@ export default function HomePage() {
           <h2>New project</h2>
           {githubLogin ? (
             <>
+              <label htmlFor="gh-search">Search repositories</label>
+              <input
+                id="gh-search"
+                value={repoQuery}
+                onChange={(e) => setRepoQuery(e.target.value)}
+                placeholder={reposLoading ? "Loading repositories…" : "Filter by name"}
+                disabled={reposLoading}
+              />
               <label htmlFor="gh-pick">Your GitHub repositories</label>
-              <select id="gh-pick" value={picked} onChange={(e) => onPickRepo(e.target.value)}>
-                <option value="">Choose a repository</option>
-                {repos.map((r) => (
+              <select id="gh-pick" value={picked} onChange={(e) => onPickRepo(e.target.value)} disabled={reposLoading}>
+                <option value="">{reposLoading ? "Loading…" : visibleRepos.length === 0 ? "No matching repositories" : "Choose a repository"}</option>
+                {visibleRepos.map((r) => (
                   <option key={r.full_name} value={r.full_name}>
                     {r.full_name}
-                    {r.private ? " (private)" : ""}
+                    {r.private ? " (private)" : " (public)"}
                   </option>
                 ))}
               </select>
               <p className="hint">
                 Signed in to GitHub as <strong>{githubLogin}</strong>. Choosing a repository fills the
-                name and URL. Private clones use that GitHub account.
+                name and URL. Public repositories clone without extra credentials. Private repositories
+                clone with this GitHub account.
               </p>
             </>
-          ) : null}
+          ) : (
+            <p className="hint">GitHub is not linked. Paste an https Git URL, or use the sample app. Private repositories need a linked GitHub account.</p>
+          )}
           <label htmlFor="name">Project name</label>
           <input
             id="name"
@@ -168,8 +221,11 @@ export default function HomePage() {
             value={repo}
             onChange={(e) => setRepo(e.target.value)}
           />
+          {sampleURL ? (
+            <p className="hint">This URL is the bundled sample, not a repository on GitHub. Use the sample button if that is what you want.</p>
+          ) : null}
           <div className="actions">
-            <button className="btn-ghost" type="submit" disabled={!!busy}>
+            <button className="btn-primary" type="submit" disabled={!!busy}>
               {busy === "custom" ? "Creating…" : "Create project"}
             </button>
           </div>

@@ -58,6 +58,26 @@ func HostURLForSlug(proxyBase, slug string) string {
 	return "http://" + slug + ".localhost:" + port + "/"
 }
 
+// OriginOf drops the path. A CORS check compares the browser origin,
+// which never includes a trailing slash or a route.
+func OriginOf(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return strings.TrimRight(strings.TrimSpace(raw), "/")
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// JoinPublicURL appends a route to a service URL with one slash.
+func JoinPublicURL(base, path string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	path = strings.TrimLeft(strings.TrimSpace(path), "/")
+	if path == "" {
+		return base + "/"
+	}
+	return base + "/" + path
+}
+
 func (p *Postgres) CreateApplicationLink(ctx context.Context, sourceID, targetID, envKey string) (ApplicationLink, error) {
 	sourceID, err := ParseUUID(sourceID)
 	if err != nil {

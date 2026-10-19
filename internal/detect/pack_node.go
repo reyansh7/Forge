@@ -139,9 +139,15 @@ func nodeDockerfile(idx fileIndex, man npmManifest, res Result, cfg startConfig)
 		}, nil
 	}
 
-	// Keep the Phase 0 recipe when package.json only declares npm start.
+	// nodeGenericDockerfile's command is npm start. npm exits 1 when
+	// the script is absent, which is what happened after Resume Analyzer
+	// built a multi-gigabyte image. Fail before any Dockerfile is
+	// returned so the worker stays in detecting and never calls docker
+	// build. main and dependency names are not start commands. A real
+	// start script, forge.json or Procfile argv, and the framework
+	// branches below do not use this return.
 	if res.Framework == "" && !hasBuild && len(cfg.Start) == 0 && startScript == "" {
-		return nodeGenericDockerfile, nil, nil
+		return "", nil, nodeNeedStart(man, "")
 	}
 
 	var b strings.Builder

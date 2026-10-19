@@ -48,7 +48,7 @@ func TestPrepareDockerfileLeavesUserDockerfile(t *testing.T) {
 }
 
 func TestDockerRunArgsUsesDetectedPort(t *testing.T) {
-	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:3000", nil, 3000, nil, "", "")
+	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:3000", nil, 3000, nil, "", "", Resources{})
 	if err != nil {
 		t.Fatal(err)
 	}

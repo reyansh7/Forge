@@ -74,7 +74,76 @@ func (HostFetcher) Fetch(ctx context.Context, repositoryURL, dest string) error 
 	if err != nil {
 		return fmt.Errorf("fetch: git clone failed: %s", truncate(string(out), 300))
 	}
+	return refuseIncompleteCheckout(dest)
+}
+
+// refuseIncompleteCheckout rejects a tree that still needs Git LFS
+// objects or submodule checkouts. Those URLs are chosen by the
+// repository, not by the clone host already checked in
+// rejectBlockedHost, so Forge does not fetch them. Continuing would
+// build pointer files or empty directories and present that as the
+// application. A missing file is success.
+func refuseIncompleteCheckout(root string) error {
+	mods, err := readCheckoutFile(root, ".gitmodules")
+	if err != nil {
+		return err
+	}
+	if submoduleDeclared(mods) {
+		return fmt.Errorf("fetch: .gitmodules declares submodules. Forge did not clone them, so this deploy stopped instead of building empty submodule directories. Vendor those files into the repository or remove the submodule entries")
+	}
+	attrs, err := readCheckoutFile(root, ".gitattributes")
+	if err != nil {
+		return err
+	}
+	if lfsFilter(attrs) {
+		return fmt.Errorf("fetch: .gitattributes uses Git LFS (filter=lfs). Forge did not download those objects, so this deploy stopped instead of building pointer files. Commit the real files or remove the LFS filter")
+	}
 	return nil
+}
+
+func readCheckoutFile(root, name string) ([]byte, error) {
+	path := filepath.Join(root, name)
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("fetch: %s: %w", name, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("fetch: %s is a symlink and was not followed", name)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("fetch: %s: %w", name, err)
+	}
+	defer f.Close()
+	buf := make([]byte, maxManifestRead+1)
+	n, err := f.Read(buf)
+	if n == 0 && err != nil {
+		return nil, fmt.Errorf("fetch: %s: %w", name, err)
+	}
+	return buf[:n], nil
+}
+
+const maxManifestRead = 256 << 10
+
+func submoduleDeclared(body []byte) bool {
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[submodule ") {
+			return true
+		}
+	}
+	return false
+}
+
+func lfsFilter(body []byte) bool {
+	s := string(body)
+	return strings.Contains(s, "filter=lfs") || strings.Contains(s, "filter = lfs")
 }
 
 func copyHello(dest string) error {

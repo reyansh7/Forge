@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -178,11 +179,14 @@ func TestDeployAllQueuesExistingPipeline(t *testing.T) {
 		if payload["deployment_id"] != svc.DeploymentID || jobs.jobs[i].Type != queue.TypeDeploy {
 			t.Fatalf("job %d payload %+v svc %+v", i, payload, svc)
 		}
-		if svc.InternalURL == "" || svc.Status != "queued" {
+		if svc.InternalURL == "" || svc.Status != "queued" || strings.Contains(svc.InternalURL, "localhost") {
 			t.Fatalf("svc %+v", svc)
 		}
 	}
-	if len(view.Links) != 2 || view.Links[0].EnvKey != "VITE_API_URL" || view.Links[1].EnvKey != "ML_SERVICE_URL" {
+	if view.Services[0].PublicURL != "" || view.Services[1].PublicURL != "" || !strings.HasPrefix(view.Services[2].PublicURL, "http://") {
+		t.Fatalf("public urls %+v", view.Services)
+	}
+	if len(view.Links) != 3 || view.Links[0].EnvKey != "VITE_API_URL" || view.Links[1].EnvKey != "CORS_ORIGIN" || view.Links[2].EnvKey != "ML_SERVICE_URL" {
 		t.Fatalf("links %+v", view.Links)
 	}
 	front := view.Services[2]

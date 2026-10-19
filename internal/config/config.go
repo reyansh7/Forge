@@ -39,6 +39,11 @@ type Config struct {
 	// FORGE_WORKSPACE_MAX_BYTES.
 	WorkspaceMaxBytes int64
 
+	// BuildCache indexes validated images so a later deploy with the
+	// same inputs can skip docker build. Default on. FORGE_BUILD_CACHE=off
+	// forces a build. The index is not a shared package cache.
+	BuildCache bool
+
 	// CaddyAdminURL is the loopback Caddy admin API (POST /load).
 	// The worker updates routes here; it does not exec inside Caddy.
 	CaddyAdminURL string
@@ -116,6 +121,17 @@ const (
 )
 
 // Load reads FORGE_* environment variables into Config.
+func buildCacheEnabled(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "on", "1", "true":
+		return true
+	case "off", "0", "false":
+		return false
+	default:
+		return true
+	}
+}
+
 func Load() (Config, error) {
 	if err := loadDotEnv(".env"); err != nil {
 		return Config{}, err
@@ -177,6 +193,7 @@ func common() (Config, error) {
 		RedisURL:             os.Getenv("FORGE_REDIS_URL"),
 		WorkspaceDir:         getenv("FORGE_WORKSPACE_DIR", ""),
 		WorkspaceMaxBytes:    getenvInt64("FORGE_WORKSPACE_MAX_BYTES", DefaultWorkspaceMaxBytes),
+		BuildCache:           buildCacheEnabled(getenv("FORGE_BUILD_CACHE", "")),
 		CaddyAdminURL:        getenv("FORGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
 		CaddyUpstreamHost:    getenv("FORGE_CADDY_UPSTREAM_HOST", "host.docker.internal"),
 		ProxyPublicBase:      getenv("FORGE_PROXY_PUBLIC_BASE", "http://127.0.0.1:9080"),

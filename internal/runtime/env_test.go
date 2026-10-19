@@ -48,7 +48,7 @@ func TestDockerLogsFollowArgs(t *testing.T) {
 }
 
 func TestDockerRunArgsDropCapabilities(t *testing.T) {
-	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, nil, "", "")
+	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, nil, "", "", Resources{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestDockerRunArgsNamedVolume(t *testing.T) {
 	name := "forgevol_aaaaaaaabbbbccccddddeeeeeeeeeeee_data"
 	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, []VolumeMount{
 		{Name: name, Path: "/data"},
-	}, "", "")
+	}, "", "", Resources{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestDockerRunArgsPreviewVolume(t *testing.T) {
 	name := "forgevol_aaaaaaaabbbbccccddddeeeeeeeeeeee_preview_data"
 	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, []VolumeMount{
 		{Name: name, Path: "/data"},
-	}, "", "")
+	}, "", "", Resources{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,18 +106,18 @@ func TestDockerRunArgsPreviewVolume(t *testing.T) {
 func TestDockerRunArgsRejectsHostBind(t *testing.T) {
 	if _, err := dockerRunArgs("forgeimg", "c", "127.0.0.1:9:8080", nil, 8080, []VolumeMount{
 		{Name: "/var/run/docker.sock", Path: "/var/run/docker.sock"},
-	}, "", ""); err == nil {
+	}, "", "", Resources{}); err == nil {
 		t.Fatal("host bind")
 	}
 	if _, err := dockerRunArgs("forgeimg", "c", "127.0.0.1:9:8080", nil, 8080, []VolumeMount{
 		{Name: "forgevol_aaaaaaaabbbbccccddddeeeeeeeeeeee_data", Path: "/etc"},
-	}, "", ""); err == nil {
+	}, "", "", Resources{}); err == nil {
 		t.Fatal("reserved path")
 	}
 }
 
 func TestDockerRunArgsProjectNetworkStaysLoopback(t *testing.T) {
-	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, nil, "forgep-aaaaaaaabbbb", "api")
+	args, err := dockerRunArgs("forgeimg", "forge-run-abc", "127.0.0.1:9:8080", nil, 8080, nil, "forgep-aaaaaaaabbbb", "api", Resources{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestDockerRunArgsProjectNetworkStaysLoopback(t *testing.T) {
 	if !containsPair(args, "-p", "127.0.0.1:9:8080") {
 		t.Fatalf("%s", joined)
 	}
-	if _, err := dockerRunArgs("forgeimg", "c", "127.0.0.1:9:8080", nil, 8080, nil, "host", "api"); err == nil {
+	if _, err := dockerRunArgs("forgeimg", "c", "127.0.0.1:9:8080", nil, 8080, nil, "host", "api", Resources{}); err == nil {
 		t.Fatal("host network must be rejected")
 	}
 }

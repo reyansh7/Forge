@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -152,6 +153,27 @@ func SuggestedLocalHost(name, applicationID string) string {
 	return got
 }
 
+// BridgeAlias is the DNS name other containers on the project bridge use.
+//
+// Public Host slugs reject reserved labels such as "api" so an
+// application cannot take api.localhost. A Compose file can still
+// hard-code http://api:5000 inside an image. That name is only a
+// bridge alias, not a public hostname, so the reserved-label rule
+// does not apply here. An operator local_host replaces the alias.
+func BridgeAlias(name, localHost, applicationID string) string {
+	if slug := strings.ToLower(strings.TrimSpace(localHost)); slug != "" {
+		return slug
+	}
+	slug := slugifyLocalHost(name)
+	if slug == "" || slug == "host" || slug == "bridge" || slug == "none" {
+		return SuggestedLocalHost(name, applicationID)
+	}
+	if !localHostPattern.MatchString(slug) {
+		return SuggestedLocalHost(name, applicationID)
+	}
+	return slug
+}
+
 func slugifyLocalHost(name string) string {
 	var b strings.Builder
 	lastDash := true
@@ -213,6 +235,52 @@ func ValidateApplication(name, repositoryURL, rootDirectory, healthPath, localHo
 	in.HealthPath = health
 	in.LocalHost = host
 	return in, nil
+}
+
+// ValidateResources checks the container budget and the readiness
+// timeout. Zero keeps the historical default. The same ceilings are
+// CHECK constraints in migration 0021.
+func ValidateResources(memoryMB, cpuMillis, pids, healthTimeoutSeconds int) error {
+	if memoryMB != 0 && (memoryMB < 64 || memoryMB > 2048) {
+		return fmt.Errorf("memory_mb must be 0 or between 64 and 2048")
+	}
+	if cpuMillis != 0 && (cpuMillis < 100 || cpuMillis > 2000) {
+		return fmt.Errorf("cpu_millis must be 0 or between 100 and 2000")
+	}
+	if pids != 0 && (pids < 32 || pids > 1024) {
+		return fmt.Errorf("pids_limit must be 0 or between 32 and 1024")
+	}
+	if healthTimeoutSeconds != 0 && (healthTimeoutSeconds < 5 || healthTimeoutSeconds > 180) {
+		return fmt.Errorf("health_timeout_seconds must be 0 or between 5 and 180")
+	}
+	return nil
+}
+
+// ResolveHealthTimeout turns the stored seconds into the probe budget.
+// Zero uses fallback, which itself defaults to 45s and is clamped to
+// the same 5–180s window so a misconfigured process cannot wait forever.
+// ValidateExposure accepts the manifest's public/private flag.
+// Empty means the historical role default.
+func ValidateExposure(raw string) error {
+	switch strings.TrimSpace(raw) {
+	case "", "public", "private":
+		return nil
+	default:
+		return fmt.Errorf("exposure must be public, private, or empty")
+	}
+}
+
+func ResolveHealthTimeout(seconds int, fallback time.Duration) (time.Duration, error) {
+	if err := ValidateResources(0, 0, 0, seconds); err != nil {
+		return 0, err
+	}
+	if seconds == 0 {
+		if fallback < 5*time.Second || fallback > 180*time.Second {
+			fallback = 45 * time.Second
+		}
+		return fallback, nil
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 // ValidateBuildPackage accepts the Go package a deploy should compile

@@ -2,17 +2,23 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { applyEnvTemplate, listEnvTemplates, type EnvTemplate } from "./api";
+import { applyEnvTemplate, type EnvTemplate } from "./api";
 
-// One form per .env.example Forge found in the GitHub repository.
+// One form per service folder.
 //
-// A monorepo often has frontend/, backend/, and a model folder, each
-// with its own example file. Saving a subfolder writes those values
-// onto the application whose root directory is that folder, creating
-// the application if this project does not have it yet. The root file
-// stays on the application the operator already opened.
-export function EnvTemplates({ applicationId }: { applicationId: string }) {
-  const [rows, setRows] = useState<EnvTemplate[] | null>(null);
+// The parent loads the repository files before this card paints, so the
+// operator does not see an empty form and then the file a moment later.
+// templates === null means that read is still in flight. A folder other
+// than the application already open is saved as its own service.
+export function EnvTemplates({
+  applicationId,
+  templates,
+  onSaved,
+}: {
+  applicationId: string;
+  templates: EnvTemplate[] | null;
+  onSaved?: () => void;
+}) {
   const [values, setValues] = useState<Record<string, Record<string, string>>>({});
   const [note, setNote] = useState("");
   const [savedId, setSavedId] = useState("");
@@ -20,49 +26,42 @@ export function EnvTemplates({ applicationId }: { applicationId: string }) {
   const [busy, setBusy] = useState("");
 
   useEffect(() => {
-    let cancelled = false;
-    void listEnvTemplates(applicationId)
-      .then((list) => {
-        if (!cancelled) {
-          setRows(list);
-          const next: Record<string, Record<string, string>> = {};
-          for (const row of list) {
-            next[row.path] = {};
-            for (const item of row.vars ?? []) {
-              next[row.path][item.key] = item.value ?? "";
-            }
-          }
-          setValues(next);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setRows([]);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [applicationId]);
+    if (!templates) {
+      return;
+    }
+    const next: Record<string, Record<string, string>> = {};
+    for (const row of templates) {
+      next[row.directory] = {};
+      for (const item of row.vars ?? []) {
+        next[row.directory][item.key] = item.value ?? "";
+      }
+    }
+    setValues(next);
+  }, [templates]);
 
-  if (!rows || rows.length === 0) {
+  if (templates === null) {
+    return <p className="empty">Reading environment files from the repository…</p>;
+  }
+  if (templates.length === 0) {
     return null;
   }
+  const rows = templates;
 
   async function save(row: EnvTemplate) {
     setBusy(row.path);
     setErr("");
     setNote("");
     const filled = (row.vars ?? [])
-      .map((item) => ({ key: item.key, value: values[row.path]?.[item.key] ?? item.value ?? "" }))
+      .map((item) => ({ key: item.key, value: values[row.directory]?.[item.key] ?? item.value ?? "" }))
       .filter((item) => item.value.trim() !== "");
     try {
       const saved = await applyEnvTemplate(applicationId, row.directory, filled);
       setSavedId(saved.application_id === applicationId ? "" : saved.application_id);
+      onSaved?.();
       if (saved.application_id === applicationId) {
         setNote(`Saved ${filled.length} values on this application. Deploy again so the build can see them.`);
       } else {
-        setNote(`Saved on ${saved.name}. Deploy that service to build the ${saved.root_directory} folder.`);
+        setNote(`Saved on ${saved.name}. That folder keeps its own environment. Deploy that service to build ${saved.root_directory}.`);
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : "could not save environment");
@@ -74,12 +73,13 @@ export function EnvTemplates({ applicationId }: { applicationId: string }) {
   return (
     <div style={{ marginTop: "1rem" }}>
       <p className="hint" style={{ marginTop: 0 }}>
-        This repository has an environment file in more than one folder. Fill the keys for each folder.
-        A folder other than the repository root is saved as its own service.
+        {rows.length > 1
+          ? "Each folder has its own environment. Values are already filled from the repository. Save a folder to store those keys on that service."
+          : `Values are already filled from ${rows[0].source || rows[0].path}. Save them to use them on the next deploy.`}
       </p>
       {rows.map((row) => (
         <form
-          key={row.path}
+          key={row.directory}
           className="card"
           style={{ marginTop: "0.75rem", padding: "0.9rem" }}
           onSubmit={(e) => {
@@ -88,7 +88,7 @@ export function EnvTemplates({ applicationId }: { applicationId: string }) {
           }}
         >
           <h2 style={{ fontSize: "1rem" }}>{row.directory === "." ? "Repository root" : row.directory}</h2>
-          <p className="empty">{row.path}</p>
+          <p className="empty">{row.source ? `From ${row.source}` : row.path}</p>
           {(row.vars ?? []).length === 0 ? (
             <p className="empty">No keys in this example file.</p>
           ) : (
@@ -96,14 +96,14 @@ export function EnvTemplates({ applicationId }: { applicationId: string }) {
               <div key={item.key} className="form-grid" style={{ marginTop: "0.45rem" }}>
                 <label htmlFor={`${row.path}-${item.key}`}>{item.key}</label>
                 <input
-                  id={`${row.path}-${item.key}`}
+                  id={`${row.directory}-${item.key}`}
                   type="text"
                   autoComplete="off"
-                  value={values[row.path]?.[item.key] ?? item.value ?? ""}
+                  value={values[row.directory]?.[item.key] ?? item.value ?? ""}
                   onChange={(e) =>
                     setValues((cur) => ({
                       ...cur,
-                      [row.path]: { ...cur[row.path], [item.key]: e.target.value },
+                      [row.directory]: { ...cur[row.directory], [item.key]: e.target.value },
                     }))
                   }
                 />

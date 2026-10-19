@@ -1,9 +1,10 @@
 // Package deploy is the worker pipeline for one application deployment.
 //
-// Flow: load application → fetch its repo (unless rollback) → confine
-// root_directory → detect → build → run with env vars *alongside* the
-// previous LIVE container → health check on health_path → Caddy Host
-// switch → mark LIVE → stop the previous container.
+// Flow: load application → fetch its repo (unless rollback) → remove
+// the fetched .git directory → confine root_directory → detect → build
+// → run with env vars *alongside* the previous LIVE container → health
+// check on health_path → Caddy Host switch → mark LIVE → stop the
+// previous container.
 //
 // A failed health check or Caddy load leaves the previous LIVE row
 // and its container running. This is rolling deploy, not canary.
@@ -67,13 +68,17 @@ type Handler struct {
 	WorkspaceDir string
 	// WorkspaceMaxBytes is the Phase 5 disk quota on a fetched repo.
 	// 0 means config.DefaultWorkspaceMaxBytes (256 MiB). This is
-	// measured after Fetch and before docker build. It is an
-	// application cap on regular-file bytes, not a reading of free
-	// space on the host disk, and not a container --storage-opt.
-	// FORGE_WORKSPACE_MAX_BYTES overrides it.
+	// measured after Fetch and after .git is removed, before docker
+	// build. It is an application cap on regular-file bytes, not a
+	// reading of free space on the host disk, and not a container
+	// --storage-opt. FORGE_WORKSPACE_MAX_BYTES overrides it.
 	WorkspaceMaxBytes int64
-	ProxyBase         string
-	HealthTimeout     time.Duration
+	// gitCleanup replaces removeGitMetadata in tests. Production
+	// leaves it nil. A failure here stops the deploy before the quota
+	// walk and before docker build.
+	gitCleanup    func(root string) error
+	ProxyBase     string
+	HealthTimeout time.Duration
 	// NodeID is this worker's nodes.id. Empty skips leasing so unit
 	// tests that drive the pipeline directly do not need a lease row.
 	// Production cmd/worker always sets it.
@@ -86,6 +91,10 @@ type Handler struct {
 	// Health is optional. Tests inject a success stub; production uses
 	// runtime.HealthGET against the published loopback port.
 	Health func(ctx context.Context, port int, timeout time.Duration) error
+	// BuildCache indexes validated images by a hash of the build inputs.
+	// Nil skips reuse. Production sets it when FORGE_BUILD_CACHE is not off.
+	// A hit still runs the container and the health check.
+	BuildCache BuildCacheIndex
 }
 
 type deployPayload struct {
@@ -134,6 +143,12 @@ func (h Handler) Handle(ctx context.Context, job queue.Job) error {
 	// execution. The lease is not taken yet.
 	if view, err := h.sagaView(ctx, id); err != nil {
 		return err
+	} else if why := dependencyFailed(view); why != "" {
+		// A failed ML service must not let the backend build, and a
+		// failed backend must not let the frontend bake a URL for a
+		// service that will not be promoted. ErrDefer is only for a
+		// dependency that is still running.
+		return h.fail(ctx, d, store.StatusDetecting, fmt.Errorf("dependency failed before build: %s", why))
 	} else if dependenciesPending(view) {
 		return queue.ErrDefer
 	}
@@ -268,16 +283,17 @@ func (h Handler) runPipeline(ctx context.Context, d store.Deployment, app store.
 	if st, inspErr := h.Runner.Inspect(ctx, container); inspErr == nil && st.Exists && !st.Running {
 		logs, _ := h.Runner.Logs(ctx, container, 80)
 		_ = h.Runner.Stop(ctx, container)
-		return h.fail(ctx, d, store.StatusDeploying, fmt.Errorf("Container %s exited immediately (status %s, exit %d).\n\n%s", container, st.Status, st.ExitCode, strings.TrimSpace(logs)))
+		return h.fail(ctx, d, store.StatusDeploying, fmt.Errorf("process startup failed: container %s exited before the readiness check (status %s, exit %d). The previous live release was not replaced.\n\n%s", container, st.Status, st.ExitCode, strings.TrimSpace(logs)))
 	}
 
 	if err := h.setStatus(ctx, &d, store.StatusHealthCheck, d.RuntimeKind, ""); err != nil {
 		_ = h.Runner.Stop(ctx, container)
 		return err
 	}
-	timeout := h.HealthTimeout
-	if timeout == 0 {
-		timeout = 45 * time.Second
+	timeout, err := store.ResolveHealthTimeout(app.HealthTimeoutSeconds, h.HealthTimeout)
+	if err != nil {
+		_ = h.Runner.Stop(ctx, container)
+		return h.fail(ctx, d, store.StatusHealthCheck, err)
 	}
 	path := healthPath(app, spec)
 	health := h.Health
@@ -308,7 +324,10 @@ func (h Handler) runPipeline(ctx context.Context, d store.Deployment, app store.
 	meas.health = measuredMS(time.Since(healthAt))
 	if err != nil {
 		_ = h.Runner.Stop(ctx, container)
-		return h.fail(ctx, d, store.StatusHealthCheck, err)
+		// Readiness is the HTTP probe. Process startup was the inspect
+		// above. Either failure stops before Caddy cutover, so the last
+		// healthy release keeps the route.
+		return h.fail(ctx, d, store.StatusHealthCheck, fmt.Errorf("readiness check failed; the previous live release was not replaced: %w", err))
 	}
 
 	// Operator slug wins. An empty slug still gets a Host route so
@@ -338,8 +357,8 @@ func (h Handler) runPipeline(ctx context.Context, d store.Deployment, app store.
 	// project-network alias. An explicit local_host, or a frontend,
 	// still gets the public Host route. Loopback publish remains so
 	// the health check can run; it is not a public listener.
-	if sagaView.InSaga && !exposePublic(app.Name, app.LocalHost) {
-		d.PublicURL = store.InternalServiceURL(slug, spec.ListenPort())
+	if sagaView.InSaga && !exposePublic(app.Name, app.LocalHost, app.Exposure) {
+		d.PublicURL = store.InternalServiceURL(store.BridgeAlias(app.Name, app.LocalHost, app.ID), spec.ListenPort())
 	} else {
 		routeSlug := store.RouteLocalHost(d.Environment, slug)
 		d.PublicURL = proxy.PublicURL(h.ProxyBase, d.ID)
@@ -401,6 +420,9 @@ func (h Handler) fetchSource(ctx context.Context, d store.Deployment, app store.
 		}
 		token = t
 	}
+	if sf, ok := h.Fetcher.(runtime.ScopedFetcher); ok {
+		return sf.FetchScope(ctx, app.RepositoryURL, dest, d.CommitSHA, token, app.RootDirectory)
+	}
 	if gf, ok := h.Fetcher.(runtime.GitFetcher); ok && (strings.TrimSpace(d.CommitSHA) != "" || token != "") {
 		return gf.FetchRef(ctx, app.RepositoryURL, dest, d.CommitSHA, token)
 	}
@@ -415,6 +437,18 @@ func (h Handler) runBuild(ctx context.Context, d *store.Deployment, app store.Ap
 	err := h.fetchSource(ctx, *d, app, work)
 	meas.fetch = measuredMS(time.Since(fetchAt))
 	if err != nil {
+		return detect.Result{}, h.fail(ctx, *d, store.StatusDetecting, err)
+	}
+	// Clone and checkout are finished. Detection reads the working
+	// tree and skips .git, so the object store is only disk cost.
+	// Removing it does not shrink the download that already happened.
+	// If removal fails, stop here: continuing would measure a tree we
+	// could not clean, and building might still send .git to Docker.
+	cleanup := h.gitCleanup
+	if cleanup == nil {
+		cleanup = removeGitMetadata
+	}
+	if err := cleanup(work); err != nil {
 		return detect.Result{}, h.fail(ctx, *d, store.StatusDetecting, err)
 	}
 	report, err := h.checkWorkspaceSize(work)
@@ -481,21 +515,23 @@ func (h Handler) runBuild(ctx context.Context, d *store.Deployment, app store.Ap
 	}
 	image := "forge-app-" + strings.ReplaceAll(d.ID, "-", "")
 	buildAt := time.Now()
-	log, err := h.Builder.Build(ctx, buildDir, image, d.RuntimeKind, env)
-	if err != nil {
-		if pkg, ok := RepairGoPackage(log + "\n" + err.Error()); ok && strings.TrimSpace(app.BuildPackage) == "" {
-			if werr := os.WriteFile(filepath.Join(buildDir, ".forge-build-package"), []byte(pkg+"\n"), 0o600); werr == nil {
-				if g, ok := h.Store.(sagaStore); ok {
-					_ = g.SetBuildPackage(ctx, app.ID, pkg)
-				}
-				app.BuildPackage = pkg
-				repaired, rerr := h.Builder.Build(ctx, buildDir, image, d.RuntimeKind, env)
-				log += "\nrepair: set build_package " + pkg + " and rebuilt\n" + repaired
-				err = rerr
-			}
+	log, err, cacheLabel := h.buildWithCache(ctx, app, buildDir, image, d.RuntimeKind, env)
+	meas.cache = cacheLabel
+	meas.build = measuredMS(time.Since(buildAt))
+	// The log line is Docker's own report of bytes sent as build
+	// context. It is not the workspace quota and not the Git download.
+	// No line means unavailable, including when the builder's progress
+	// format does not contain one.
+	if n, ok := runtime.LargestContextBytes(log); ok {
+		meas.contextKnown = true
+		meas.contextBytes = n
+	}
+	if err == nil {
+		if n, ok := imageSize(ctx, h.Builder, image); ok {
+			meas.imageKnown = true
+			meas.imageBytes = n
 		}
 	}
-	meas.build = measuredMS(time.Since(buildAt))
 	d.BuildLog = store.SanitizeBuildLog(detected.LogLines() + log)
 	d.ImageName = image
 	if err != nil {
@@ -657,7 +693,7 @@ func (h Handler) applyServiceLinks(ctx context.Context, applicationID string, en
 				}
 			}
 		}
-		u := serviceLinkURL(h.ProxyBase, tgt, listen)
+		u := serviceLinkURL(h.ProxyBase, tgt, listen, link.EnvKey)
 		if err := store.ValidateEnvValue(u); err != nil {
 			return nil, err
 		}
@@ -789,10 +825,12 @@ func (s stageMeasurement) logValue() any {
 	return s.ms
 }
 
-// deployMeasurements is what this worker can observe without asking git
-// or Docker for numbers they do not return. transferred bytes are never
-// stored here: a shallow clone does not report wire size, and 0 would
-// look like an empty transfer.
+// deployMeasurements is what this worker can observe. transferred_bytes
+// stays unavailable: a shallow clone does not report wire size, and 0
+// would look like an empty transfer. context_bytes is set only when the
+// Docker build log contains a context-transfer line. image_bytes is set
+// only when docker image inspect returns a size. Missing numbers stay
+// unavailable rather than becoming 0.
 type deployMeasurements struct {
 	fetch          stageMeasurement
 	detect         stageMeasurement
@@ -802,6 +840,11 @@ type deployMeasurements struct {
 	total          stageMeasurement
 	workspaceBytes int64
 	workspaceKnown bool
+	contextBytes   int64
+	contextKnown   bool
+	imageBytes     int64
+	imageKnown     bool
+	cache          string
 }
 
 func (m deployMeasurements) workspaceLogValue() any {
@@ -809,6 +852,47 @@ func (m deployMeasurements) workspaceLogValue() any {
 		return "unavailable"
 	}
 	return m.workspaceBytes
+}
+
+func (m deployMeasurements) contextLogValue() any {
+	if !m.contextKnown {
+		return "unavailable"
+	}
+	return m.contextBytes
+}
+
+func (m deployMeasurements) imageLogValue() any {
+	if !m.imageKnown {
+		return "unavailable"
+	}
+	return m.imageBytes
+}
+
+func (m deployMeasurements) cacheLogValue() string {
+	switch m.cache {
+	case "hit", "miss", "bypass":
+		return m.cache
+	default:
+		return "unavailable"
+	}
+}
+
+// imageSizer is optional. HostDocker implements it. A test double
+// that only builds does not, and the measurement stays unavailable.
+type imageSizer interface {
+	ImageBytes(ctx context.Context, image string) (int64, error)
+}
+
+func imageSize(ctx context.Context, builder runtime.Builder, image string) (int64, bool) {
+	sizer, ok := builder.(imageSizer)
+	if !ok {
+		return 0, false
+	}
+	n, err := sizer.ImageBytes(ctx, image)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 func (h Handler) logMeasurements(id string, m deployMeasurements) {
@@ -820,18 +904,49 @@ func (h Handler) logMeasurements(id string, m deployMeasurements) {
 		"fetch_ms", m.fetch.logValue(),
 		"transferred_bytes", "unavailable",
 		"workspace_bytes", m.workspaceLogValue(),
+		"context_bytes", m.contextLogValue(),
+		"image_bytes", m.imageLogValue(),
 		"detect_ms", m.detect.logValue(),
 		"build_ms", m.build.logValue(),
+		"build_cache", m.cacheLogValue(),
 		"start_ms", m.start.logValue(),
 		"health_ms", m.health.logValue(),
 		"total_ms", m.total.logValue(),
 	)
 }
 
+// removeGitMetadata deletes the Git directory or gitdir file that
+// fetch left in the workspace. A missing .git is success: forge://hello
+// is a copy and has none. A symlink is unlinked and not followed, so a
+// link cannot delete a directory outside this workspace. Application
+// files next to .git are left in place. The caller fails the deployment
+// when this returns an error.
+func removeGitMetadata(root string) error {
+	gitPath := filepath.Join(root, ".git")
+	info, err := os.Lstat(gitPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("remove git metadata: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(gitPath); err != nil {
+			return fmt.Errorf("remove git metadata: %w", err)
+		}
+		return nil
+	}
+	if err := os.RemoveAll(gitPath); err != nil {
+		return fmt.Errorf("remove git metadata: %w", err)
+	}
+	return nil
+}
+
 // checkWorkspaceSize walks the fetched tree and fails if regular-file
 // bytes exceed the quota. The walk finishes so the measured total and
 // the largest files are the real ones, not whichever path happened to
-// cross the cap first. The clone has already written those files.
+// cross the cap first. removeGitMetadata has already dropped .git; the
+// clone has already written the working tree.
 // Symlinks are not followed, so a link to / cannot inflate the count
 // into a host-wide scan. Only workspaceReportFiles paths are retained.
 // Failure here is StatusDetecting: we have not built.

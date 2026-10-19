@@ -49,31 +49,41 @@ type RouteApplier interface {
 }
 
 type applicationResponse struct {
-	ID            string    `json:"id"`
-	ProjectID     string    `json:"project_id"`
-	Name          string    `json:"name"`
-	RepositoryURL string    `json:"repository_url"`
-	RootDirectory string    `json:"root_directory"`
-	HealthPath    string    `json:"health_path"`
-	LocalHost     string    `json:"local_host"`
-	BuildPackage  string    `json:"build_package,omitempty"`
-	PlatformURL   string    `json:"platform_url,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID                   string    `json:"id"`
+	ProjectID            string    `json:"project_id"`
+	Name                 string    `json:"name"`
+	RepositoryURL        string    `json:"repository_url"`
+	RootDirectory        string    `json:"root_directory"`
+	HealthPath           string    `json:"health_path"`
+	LocalHost            string    `json:"local_host"`
+	BuildPackage         string    `json:"build_package,omitempty"`
+	MemoryMB             int       `json:"memory_mb"`
+	CPUMillis            int       `json:"cpu_millis"`
+	PidsLimit            int       `json:"pids_limit"`
+	HealthTimeoutSeconds int       `json:"health_timeout_seconds"`
+	Exposure             string    `json:"exposure,omitempty"`
+	PlatformURL          string    `json:"platform_url,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 func applicationResponseFrom(a store.Application) applicationResponse {
 	return applicationResponse{
-		ID:            a.ID,
-		ProjectID:     a.ProjectID,
-		Name:          a.Name,
-		RepositoryURL: a.RepositoryURL,
-		RootDirectory: a.RootDirectory,
-		HealthPath:    a.HealthPath,
-		LocalHost:     a.LocalHost,
-		BuildPackage:  a.BuildPackage,
-		CreatedAt:     a.CreatedAt.UTC(),
-		UpdatedAt:     a.UpdatedAt.UTC(),
+		ID:                   a.ID,
+		ProjectID:            a.ProjectID,
+		Name:                 a.Name,
+		RepositoryURL:        a.RepositoryURL,
+		RootDirectory:        a.RootDirectory,
+		HealthPath:           a.HealthPath,
+		LocalHost:            a.LocalHost,
+		BuildPackage:         a.BuildPackage,
+		MemoryMB:             a.MemoryMB,
+		CPUMillis:            a.CPUMillis,
+		PidsLimit:            a.PidsLimit,
+		HealthTimeoutSeconds: a.HealthTimeoutSeconds,
+		Exposure:             a.Exposure,
+		CreatedAt:            a.CreatedAt.UTC(),
+		UpdatedAt:            a.UpdatedAt.UTC(),
 	}
 }
 
@@ -120,6 +130,14 @@ type applicationBody struct {
 	// BuildPackage is omitted by the settings form. Nil keeps the
 	// stored package so a save does not clear ./cmd/api.
 	BuildPackage *string `json:"build_package,omitempty"`
+	// Zero keeps the historical container defaults and the 45s probe.
+	MemoryMB             int `json:"memory_mb"`
+	CPUMillis            int `json:"cpu_millis"`
+	PidsLimit            int `json:"pids_limit"`
+	HealthTimeoutSeconds int `json:"health_timeout_seconds"`
+	// Exposure is omitted by the settings form. Nil keeps the stored
+	// public/private flag from forge.yaml.
+	Exposure *string `json:"exposure,omitempty"`
 }
 
 type envVarResponse struct {
@@ -158,6 +176,21 @@ func (s *Server) createApplication(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.BuildPackage = pkg
+	}
+	if err := store.ValidateResources(req.MemoryMB, req.CPUMillis, req.PidsLimit, req.HealthTimeoutSeconds); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	in.MemoryMB = req.MemoryMB
+	in.CPUMillis = req.CPUMillis
+	in.PidsLimit = req.PidsLimit
+	in.HealthTimeoutSeconds = req.HealthTimeoutSeconds
+	if req.Exposure != nil {
+		if err := store.ValidateExposure(*req.Exposure); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		in.Exposure = *req.Exposure
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -254,6 +287,22 @@ func (s *Server) updateApplication(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.BuildPackage = pkg
+	}
+	if err := store.ValidateResources(req.MemoryMB, req.CPUMillis, req.PidsLimit, req.HealthTimeoutSeconds); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	in.MemoryMB = req.MemoryMB
+	in.CPUMillis = req.CPUMillis
+	in.PidsLimit = req.PidsLimit
+	in.HealthTimeoutSeconds = req.HealthTimeoutSeconds
+	in.Exposure = app.Exposure
+	if req.Exposure != nil {
+		if err := store.ValidateExposure(*req.Exposure); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		in.Exposure = *req.Exposure
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()

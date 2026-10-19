@@ -23,6 +23,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
+	"sort"
 	"strings"
 	"time"
 )
@@ -222,10 +224,17 @@ type EnvExampleVar struct {
 	Value string `json:"value"`
 }
 
-// EnvTemplate is one .env.example in a repository.
+// EnvTemplate is the environment for one folder.
+//
+// Path is the file in git when that folder has its own example.
+// Source is set when the keys were taken from a shared root file and
+// assigned to this folder, so the form can say where they came from.
+// Directory "." is the repository root. Any other directory is saved
+// onto the service whose root is that folder.
 type EnvTemplate struct {
 	Path      string          `json:"path"`
 	Directory string          `json:"directory"`
+	Source    string          `json:"source,omitempty"`
 	Vars      []EnvExampleVar `json:"vars"`
 }
 
@@ -284,11 +293,16 @@ func envKeyOK(key string) bool {
 	return true
 }
 
-// EnvTemplates lists .env.example files at the repo root and one folder down.
+// EnvTemplates lists example env files at the repo root and one folder down,
+// then gives each service folder its own set of keys.
 //
-// The git tree is not cloned. A monorepo with frontend/, backend/, and
-// ml-model/ therefore shows three forms before any deploy. .env itself
-// is ignored so a committed secret is not pulled into the API.
+// The git tree is not cloned. A folder with its own .env.example,
+// .env.sample, or .env.template keeps that file. When the only file is
+// a shared root example, keys are split: browser build keys and
+// CLIENT_PORT go to the one frontend folder (client, frontend, web, ui),
+// and every other key goes to the one backend folder (server, api,
+// backend). A committed .env is never read, so a real secret in git is
+// not copied into the API. Database keys stay off the frontend.
 func (c *Client) EnvTemplates(ctx context.Context, token, repo, ref string) ([]EnvTemplate, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -298,43 +312,222 @@ func (c *Client) EnvTemplates(ctx context.Context, token, repo, ref string) ([]E
 	if err != nil {
 		return nil, err
 	}
-	var out []EnvTemplate
-	add := func(path string) error {
-		body, err := c.fileContents(ctx, token, repo, path, ref)
+	var found []EnvTemplate
+	add := func(filePath string) error {
+		body, err := c.fileContents(ctx, token, repo, filePath, ref)
 		if err != nil {
 			return err
 		}
 		dir := "."
-		if i := strings.LastIndex(path, "/"); i >= 0 {
-			dir = path[:i]
+		if i := strings.LastIndex(filePath, "/"); i >= 0 {
+			dir = filePath[:i]
 		}
-		out = append(out, EnvTemplate{Path: path, Directory: dir, Vars: EnvExampleVars(body)})
+		found = append(found, EnvTemplate{Path: filePath, Directory: dir, Vars: EnvExampleVars(body)})
 		return nil
 	}
 	for _, ent := range root {
-		if ent.Type == "file" && ent.Name == ".env.example" {
+		if ent.Type == "file" && isEnvExampleName(ent.Name) {
 			if err := add(ent.Path); err != nil {
 				return nil, err
 			}
 		}
 	}
+	var services []string
 	for _, ent := range root {
-		if ent.Type != "dir" {
+		if ent.Type != "dir" || skipEnvDir(ent.Name) {
 			continue
 		}
 		kids, err := c.listContents(ctx, token, repo, ent.Path, ref)
 		if err != nil {
 			return nil, err
 		}
+		marker := false
 		for _, kid := range kids {
-			if kid.Type == "file" && kid.Name == ".env.example" {
+			if kid.Type != "file" {
+				continue
+			}
+			if isEnvExampleName(kid.Name) {
 				if err := add(kid.Path); err != nil {
 					return nil, err
 				}
 			}
+			if isServiceMarker(kid.Name) {
+				marker = true
+			}
+		}
+		if marker {
+			services = append(services, ent.Path)
 		}
 	}
-	return out, nil
+	return partitionEnvTemplates(found, services), nil
+}
+
+func isEnvExampleName(name string) bool {
+	switch name {
+	case ".env.example", ".env.sample", ".env.template":
+		return true
+	default:
+		return false
+	}
+}
+
+func isServiceMarker(name string) bool {
+	switch name {
+	case "Dockerfile", "package.json", "go.mod", "requirements.txt", "pyproject.toml", "Cargo.toml":
+		return true
+	default:
+		return false
+	}
+}
+
+func skipEnvDir(name string) bool {
+	switch name {
+	case "node_modules", "vendor", ".git", "dist", ".next", "build":
+		return true
+	default:
+		return false
+	}
+}
+
+// folderRole classifies a service directory by its name. An unknown
+// name is left blank so a shared env file is not guessed onto it.
+func folderRole(dir string) string {
+	switch strings.ToLower(path.Base(dir)) {
+	case "client", "frontend", "web", "ui":
+		return "frontend"
+	case "server", "api", "backend":
+		return "backend"
+	default:
+		return ""
+	}
+}
+
+// isFrontendEnvKey is a value the browser build or the client publish
+// port needs. It matches the VITE_ / NEXT_PUBLIC_ / REACT_APP_ prefixes
+// the runtime bakes into an image. CLIENT_PORT is the compose host port
+// for the client container, not a server setting. Database keys are
+// never frontend keys.
+func isFrontendEnvKey(key string) bool {
+	return key == "CLIENT_PORT" ||
+		strings.HasPrefix(key, "VITE_") ||
+		strings.HasPrefix(key, "NEXT_PUBLIC_") ||
+		strings.HasPrefix(key, "REACT_APP_")
+}
+
+// partitionEnvTemplates gives each service folder its own environment.
+//
+// A folder that already has an example file keeps that file. A shared
+// root file is split when one frontend folder, one backend folder, or
+// one of each is waiting for keys. Several folders of the same role
+// are not guessed: the root file stays whole.
+func partitionEnvTemplates(found []EnvTemplate, services []string) []EnvTemplate {
+	found = dedupeEnvFiles(found)
+	own := map[string]EnvTemplate{}
+	var root *EnvTemplate
+	var owned []EnvTemplate
+	for i := range found {
+		t := found[i]
+		if t.Directory == "." {
+			cp := t
+			root = &cp
+			continue
+		}
+		own[t.Directory] = t
+		owned = append(owned, t)
+	}
+	if root == nil || len(services) == 0 {
+		return found
+	}
+	var frontends, backends []string
+	for _, dir := range services {
+		if _, ok := own[dir]; ok {
+			continue
+		}
+		switch folderRole(dir) {
+		case "frontend":
+			frontends = append(frontends, dir)
+		case "backend":
+			backends = append(backends, dir)
+		}
+	}
+	if len(frontends) > 1 || len(backends) > 1 || (len(frontends) == 0 && len(backends) == 0) {
+		return found
+	}
+	var frontVars, backVars, leftover []EnvExampleVar
+	for _, v := range root.Vars {
+		switch {
+		case len(frontends) == 1 && isFrontendEnvKey(v.Key):
+			frontVars = append(frontVars, v)
+		case len(backends) == 1 && !isFrontendEnvKey(v.Key):
+			backVars = append(backVars, v)
+		default:
+			leftover = append(leftover, v)
+		}
+	}
+	out := make([]EnvTemplate, 0, len(owned)+3)
+	if len(frontends) == 1 && len(frontVars) > 0 {
+		out = append(out, EnvTemplate{
+			Path:      frontends[0],
+			Directory: frontends[0],
+			Source:    root.Path,
+			Vars:      frontVars,
+		})
+	}
+	if len(backends) == 1 && len(backVars) > 0 {
+		out = append(out, EnvTemplate{
+			Path:      backends[0],
+			Directory: backends[0],
+			Source:    root.Path,
+			Vars:      backVars,
+		})
+	}
+	out = append(out, owned...)
+	if len(leftover) > 0 {
+		root.Vars = leftover
+		out = append(out, *root)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Directory == "." {
+			return false
+		}
+		if out[j].Directory == "." {
+			return true
+		}
+		return out[i].Directory < out[j].Directory
+	})
+	return out
+}
+
+func dedupeEnvFiles(in []EnvTemplate) []EnvTemplate {
+	best := map[string]EnvTemplate{}
+	var order []string
+	for _, t := range in {
+		prev, ok := best[t.Directory]
+		if !ok {
+			order = append(order, t.Directory)
+			best[t.Directory] = t
+			continue
+		}
+		if envExampleRank(t.Path) < envExampleRank(prev.Path) {
+			best[t.Directory] = t
+		}
+	}
+	out := make([]EnvTemplate, 0, len(order))
+	for _, dir := range order {
+		out = append(out, best[dir])
+	}
+	return out
+}
+
+func envExampleRank(filePath string) int {
+	switch path.Base(filePath) {
+	case ".env.example":
+		return 0
+	case ".env.sample":
+		return 1
+	default:
+		return 2
+	}
 }
 
 type contentEntry struct {

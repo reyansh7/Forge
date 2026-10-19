@@ -175,6 +175,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /projects/{id}/deploys", s.listProjectDeploys)
 	mux.HandleFunc("GET /projects/{id}/deploys/{deployId}", s.getProjectDeploy)
 	mux.HandleFunc("POST /projects/{id}/deploys/{deployId}/cancel", s.cancelProjectDeploy)
+	mux.HandleFunc("POST /projects/{id}/deploys/{deployId}/rollback", s.rollbackProjectDeploy)
 	mux.HandleFunc("POST /projects/{id}/applications", s.createApplication)
 	mux.HandleFunc("GET /projects/{id}/applications", s.listApplications)
 	mux.HandleFunc("GET /applications/{id}", s.getApplication)

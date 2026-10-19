@@ -168,7 +168,21 @@ func Tree(dir string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if idx.has("forge.yaml") {
+		services, err := parseManifest(dir)
+		if err != nil {
+			return Result{}, err
+		}
+		if multiServiceManifest(services) {
+			return Result{}, fmt.Errorf("%s", manifestDeployHint(services))
+		}
+	}
+	return analyzeIndex(idx)
+}
 
+// analyzeIndex runs the pack registry. It does not read forge.yaml, so
+// a manifest that points at this directory cannot recurse through Tree.
+func analyzeIndex(idx fileIndex) (Result, error) {
 	for _, p := range packs() {
 		if !p.Match(idx) {
 			continue
@@ -207,6 +221,20 @@ func unknownStrategy(idx fileIndex) error {
 		b.WriteString(" asset file(s) (images, video, fonts, archives). They are still copied into the image when a strategy exists.\n")
 	}
 	b.WriteString("\nNo supported build strategy or Dockerfile was found.\n\n")
+	if msg := composeProjectAdvice(idx.root); msg != "" {
+		b.WriteString(msg)
+		return fmt.Errorf("%s", b.String())
+	}
 	b.WriteString("Add a Dockerfile, or a forge.json with a \"start\" command, or a Procfile web process.")
 	return fmt.Errorf("%s", b.String())
+}
+
+func multiServiceManifest(services []Service) bool {
+	if len(services) > 1 {
+		return true
+	}
+	if len(services) == 1 && services[0].Root != "." && services[0].Root != "" {
+		return true
+	}
+	return false
 }

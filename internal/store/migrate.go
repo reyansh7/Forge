@@ -48,8 +48,11 @@ var migrationFS embed.FS
 // Invariant: version names are filenames (0001_projects.sql). Lexicographic
 // sort is apply order — that is why we zero-pad 0001, not 1.
 //
-// Deferred: down-migrations / rollback SQL, locking for two APIs migrating
-// at once (single local process in Phase 0).
+// cmd/api and cmd/worker both call Migrate on startup. Two processes
+// can pass the EXISTS check together. The INSERT is the lock: the
+// loser gets 23505, rolls its copy of the SQL back, and continues.
+// Each file must stay idempotent (IF NOT EXISTS / IF NOT EXISTS
+// column) because the winner's commit is the one that remains.
 func (p *Postgres) Migrate(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -96,6 +99,9 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 			name,
 		); err != nil {
 			_ = tx.Rollback()
+			if isUniqueViolation(err) {
+				continue
+			}
 			return fmt.Errorf("record migration %s: %w", name, err)
 		}
 		if err := tx.Commit(); err != nil {

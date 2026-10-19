@@ -13,6 +13,7 @@ import {
   listApplications,
   listProjectDeploys,
   projectPlan,
+  rollbackProjectDeploy,
   type PlanService,
   type Application,
   type Project,
@@ -125,6 +126,20 @@ export default function ProjectPage() {
     }
   }
 
+  async function onRollback(sourceId: string) {
+    setBusy(true);
+    setError("");
+    try {
+      const next = await rollbackProjectDeploy(id, sourceId);
+      setRollout(next);
+      setHistory((cur) => [next, ...cur.filter((item) => item.id !== next.id)]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "rollback failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onCreate(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
@@ -176,7 +191,7 @@ export default function ProjectPage() {
               ? "All required services are healthy."
               : rollout.status === "failed"
                 ? "This deployment did not succeed."
-                : "Builds are queued. One worker runs them one at a time."}{" "}
+                : "A Git push deploys every service from that commit. Independent builds run together. A service waits until the dependencies it declares are ready."}{" "}
             Status: {rollout.status}
           </p>
           {rollout.attention ? <div className="banner">{rollout.attention}</div> : null}
@@ -196,7 +211,10 @@ export default function ProjectPage() {
                     {s.status}
                     {s.package ? ` · ${s.package}` : s.root && s.root !== "." ? ` · ${s.root}` : ""}
                     {s.port ? ` · port ${s.port}` : ""}
-                    {s.internal_url ? ` · ${s.internal_url}` : ""}
+                    {s.depends_on && s.depends_on.length > 0 ? ` · waits on ${s.depends_on.join(", ")}` : ""}
+                    {s.public_url ? ` · ${s.public_url}` : ""}
+                    {s.internal_url ? ` · internal ${s.internal_url}` : ""}
+                    {s.generated_env && s.generated_env.length > 0 ? ` · env ${s.generated_env.join(", ")}` : ""}
                     {s.error ? ` · ${s.error}` : ""}
                   </span>
                 </div>
@@ -213,6 +231,11 @@ export default function ProjectPage() {
             <button className="btn-ghost" type="button" disabled={busy} onClick={() => void onDeployAll()}>
               Deploy again
             </button>
+            {rollout.status !== "deploying" ? (
+              <button className="btn-ghost" type="button" disabled={busy} onClick={() => void onRollback(rollout.id)}>
+                Roll back this release
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -242,7 +265,7 @@ export default function ProjectPage() {
         <div className="card" style={{ marginBottom: "0.85rem" }}>
           <h2>Detected services</h2>
           <p className="hint" style={{ marginTop: 0 }}>
-            Found in the repository. Deploy All queues one build per deployable service, dependencies first.
+            Found in the repository. A later Git push deploys this whole project from that commit. Deploy All does the same without a push. Generated service URLs are injected; you do not copy them into each .env.
             A library is listed and skipped.
           </p>
           <div className="actions">

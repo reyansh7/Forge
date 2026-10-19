@@ -38,7 +38,11 @@ type SagaView struct {
 	Committed   bool
 	ServiceName string
 	LocalHost   string
-	Siblings    []SagaSibling
+	// Plan is the project deployment snapshot. Explicit depends_on
+	// lives there so the worker can wait on the manifest, not only on
+	// service-name roles.
+	Plan     []byte
+	Siblings []SagaSibling
 }
 
 // ProjectNetworkName is the Docker bridge for one project.
@@ -86,12 +90,12 @@ func (p *Postgres) SagaView(ctx context.Context, deploymentID string) (SagaView,
 	var committed sql.NullTime
 	err = p.db.QueryRowContext(ctx, `
 		SELECT pd.id::text, pd.project_id::text, pd.status, pd.committed_at,
-		       me.service_name, COALESCE(a.local_host, '')
+		       me.service_name, COALESCE(a.local_host, ''), pd.plan
 		FROM project_deployment_services me
 		JOIN project_deployments pd ON pd.id = me.project_deployment_id
 		JOIN applications a ON a.id = me.application_id
 		WHERE me.deployment_id = $1::uuid
-	`, deploymentID).Scan(&view.RolloutID, &view.ProjectID, &view.Status, &committed, &view.ServiceName, &view.LocalHost)
+	`, deploymentID).Scan(&view.RolloutID, &view.ProjectID, &view.Status, &committed, &view.ServiceName, &view.LocalHost, &view.Plan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SagaView{}, nil
 	}

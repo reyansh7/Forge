@@ -180,3 +180,25 @@ func TestGitHubAllowlistRejectsNames(t *testing.T) {
 		t.Fatal("wildcard apps domain")
 	}
 }
+
+func TestBuildCacheDefaultsOn(t *testing.T) {
+	t.Setenv("FORGE_API_ADDR", "")
+	t.Setenv("FORGE_DATABASE_URL", "postgres://forge:forge@127.0.0.1:5432/forge?sslmode=disable")
+	t.Setenv("FORGE_REDIS_URL", "redis://127.0.0.1:6379/0")
+	t.Setenv("FORGE_BUILD_CACHE", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.BuildCache {
+		t.Fatal("empty FORGE_BUILD_CACHE must leave the image index on")
+	}
+	t.Setenv("FORGE_BUILD_CACHE", "off")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BuildCache {
+		t.Fatal("FORGE_BUILD_CACHE=off must force a build")
+	}
+}

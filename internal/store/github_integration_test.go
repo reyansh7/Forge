@@ -59,12 +59,17 @@ func TestGitHubAccountAndBindingAgainstPostgres(t *testing.T) {
 		t.Fatalf("non-github url must not use the oauth token, got %q err=%v", tok, err)
 	}
 	if _, err := pg.UpdateApplication(ctx, apps[0].ID, ApplicationInput{
-		Name:          apps[0].Name,
-		RepositoryURL: "https://github.com/octo/hello.git",
-		RootDirectory: apps[0].RootDirectory,
-		HealthPath:    apps[0].HealthPath,
-		LocalHost:     apps[0].LocalHost,
-		BuildPackage:  apps[0].BuildPackage,
+		Name:                 apps[0].Name,
+		RepositoryURL:        "https://github.com/octo/hello.git",
+		RootDirectory:        apps[0].RootDirectory,
+		HealthPath:           apps[0].HealthPath,
+		LocalHost:            apps[0].LocalHost,
+		BuildPackage:         apps[0].BuildPackage,
+		MemoryMB:             apps[0].MemoryMB,
+		CPUMillis:            apps[0].CPUMillis,
+		PidsLimit:            apps[0].PidsLimit,
+		HealthTimeoutSeconds: apps[0].HealthTimeoutSeconds,
+		Exposure:             apps[0].Exposure,
 	}); err != nil {
 		t.Fatal(err)
 	}

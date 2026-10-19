@@ -105,6 +105,9 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		Message: push.Message,
 		Author:  push.Author,
 	})
+	if handled := s.webhookProjectDeploy(w, r, ctx, binding, commit); handled {
+		return
+	}
 	d, prep := s.createQueuedDeployment(ctx, binding.ApplicationID, binding.Environment, binding.OwnerID, commit, true)
 	if prep.ignored != "" {
 		writeJSON(w, http.StatusOK, map[string]string{"ignored": prep.ignored})
@@ -117,6 +120,59 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enqueueQueued(w, r, ctx, d)
+}
+
+// webhookProjectDeploy starts one project release when the repository
+// has more than one deployable service. A single-service repository
+// returns false and the caller keeps the existing one-application path.
+// A duplicate delivery never reaches this function.
+func (s *Server) webhookProjectDeploy(w http.ResponseWriter, r *http.Request, ctx context.Context, binding store.ApplicationGitHub, commit store.CommitMeta) bool {
+	if s.Apps == nil || s.Projects == nil || s.ProjectDeploys == nil || s.Deployments == nil {
+		return false
+	}
+	app, err := s.Apps.GetApplication(ctx, binding.ApplicationID)
+	if err != nil {
+		return false
+	}
+	project, err := s.Projects.GetProject(ctx, app.ProjectID)
+	if err != nil {
+		return false
+	}
+	found, err := s.discoverProjectServices(ctx, binding.OwnerID, project)
+	if err != nil {
+		s.logger().Error("webhook project discover failed", "err", err)
+		writeError(w, http.StatusBadGateway, "could not read the repository from GitHub")
+		return true
+	}
+	selected := selectServices(found, nil)
+	if len(selected) < 2 {
+		return false
+	}
+	if len(selected) > s.nodeInflightQuota() {
+		writeJSON(w, http.StatusOK, map[string]string{"ignored": "node_cap", "error": "this node will not run that many deployments at once"})
+		return true
+	}
+	inFlight, err := s.Deployments.CountInProgressByOwner(ctx, binding.OwnerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create deployment")
+		return true
+	}
+	if inFlight > 0 {
+		writeJSON(w, http.StatusOK, map[string]string{"ignored": "in_progress"})
+		return true
+	}
+	actor := Actor{UserID: binding.OwnerID}
+	view, status, msg := s.enqueueProjectServices(ctx, r, project, actor, selected, commit)
+	if status == http.StatusBadRequest {
+		writeJSON(w, http.StatusOK, map[string]string{"ignored": "invalid_plan", "error": msg})
+		return true
+	}
+	if status != http.StatusAccepted {
+		writeError(w, status, msg)
+		return true
+	}
+	writeJSON(w, http.StatusAccepted, view)
+	return true
 }
 
 func sessionActor(s *Server, r *http.Request) (Actor, bool) {

@@ -735,12 +735,17 @@ func (s *Server) putApplicationGitHub(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := s.Apps.UpdateApplication(ctx, app.ID, store.ApplicationInput{
-		Name:          app.Name,
-		RepositoryURL: store.GitHubCloneURL(repo),
-		RootDirectory: app.RootDirectory,
-		HealthPath:    app.HealthPath,
-		LocalHost:     app.LocalHost,
-		BuildPackage:  app.BuildPackage,
+		Name:                 app.Name,
+		RepositoryURL:        store.GitHubCloneURL(repo),
+		RootDirectory:        app.RootDirectory,
+		HealthPath:           app.HealthPath,
+		LocalHost:            app.LocalHost,
+		BuildPackage:         app.BuildPackage,
+		MemoryMB:             app.MemoryMB,
+		CPUMillis:            app.CPUMillis,
+		PidsLimit:            app.PidsLimit,
+		HealthTimeoutSeconds: app.HealthTimeoutSeconds,
+		Exposure:             app.Exposure,
 	}); err != nil {
 		s.logger().Error("update application repo url failed", "err", err)
 	}

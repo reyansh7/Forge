@@ -113,6 +113,7 @@ func run(log *slog.Logger) error {
 		NodeID:            node.ID,
 		AppsDomain:        cfg.AppsDomain,
 		ControlHost:       cfg.ControlHost,
+		BuildCache:        buildCache(cfg.BuildCache, pg),
 	}
 
 	// The previous process is dead. Expire its leases so the sweeper can
@@ -157,6 +158,16 @@ func run(log *slog.Logger) error {
 // heartbeatNode keeps last_seen_at fresh so the scheduler does not
 // mark this process dead. Interval is one-third of NodeStaleAfter so
 // a single missed tick is not fatal. Never logs the join token.
+// buildCache is the image index when the operator left caching on.
+// Off returns nil so the worker always calls docker build. The index
+// never deletes images.
+func buildCache(enabled bool, pg *store.Postgres) deploy.BuildCacheIndex {
+	if !enabled || pg == nil {
+		return nil
+	}
+	return pg
+}
+
 func heartbeatNode(ctx context.Context, log *slog.Logger, pg *store.Postgres, id, advertiseHost string) {
 	t := time.NewTicker(store.NodeHeartbeatEvery)
 	defer t.Stop()

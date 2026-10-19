@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -42,7 +43,7 @@ func TestDependenciesAndCompensationOrder(t *testing.T) {
 	if dependenciesPending(view) {
 		t.Fatal("a failed dependency is not a wait; promotion is refused later")
 	}
-	if exposePublic("api", "") || !exposePublic("frontend", "") || !exposePublic("api", "api") {
+	if exposePublic("api", "", "") || !exposePublic("frontend", "", "") || !exposePublic("api", "api", "") || exposePublic("ml-model", "", "private") || !exposePublic("ml-model", "", "public") {
 		t.Fatal("private unless frontend or explicit host")
 	}
 	view = store.SagaView{InSaga: true, Siblings: []store.SagaSibling{
@@ -58,12 +59,93 @@ func TestDependenciesAndCompensationOrder(t *testing.T) {
 
 func TestServiceLinkURLKeepsPublicAddress(t *testing.T) {
 	pub := store.Application{ID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2", Name: "frontend", LocalHost: "web"}
-	if got := serviceLinkURL("http://127.0.0.1:9080", pub, 8080); got != "http://web.localhost:9080/" {
+	if got := serviceLinkURL("http://127.0.0.1:9080", pub, 8080, "API_URL"); got != "http://web.localhost:9080/" {
 		t.Fatalf("public %s", got)
 	}
 	priv := store.Application{ID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee3", Name: "api"}
-	if got := serviceLinkURL("http://127.0.0.1:9080", priv, 8080); !strings.HasPrefix(got, "http://api") || strings.Contains(got, "localhost") {
+	if got := serviceLinkURL("http://127.0.0.1:9080", priv, 5000, "ML_SERVICE_URL"); got != "http://api:5000/" {
 		t.Fatalf("private %s", got)
+	}
+	if store.BridgeAlias("api", "", priv.ID) != "api" {
+		t.Fatal("bridge alias must stay api so a baked nginx proxy can resolve it")
+	}
+	if store.SuggestedLocalHost("api", priv.ID) == "api" {
+		t.Fatal("public slug must not be the reserved label api")
+	}
+}
+
+func TestBrowserLinkUsesProxyAndOneSlash(t *testing.T) {
+	api := store.Application{ID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee3", Name: "backend"}
+	got := serviceLinkURL("http://127.0.0.1:9080", api, 8000, "NEXT_PUBLIC_API_URL")
+	if strings.Contains(got, ":8000") || strings.Contains(got, "backend:") {
+		t.Fatalf("browser URL used container DNS: %s", got)
+	}
+	if got != "http://backend.localhost:9080/" {
+		t.Fatalf("public %s", got)
+	}
+	if strings.HasSuffix(got, "//") || !strings.HasSuffix(got, "/") {
+		t.Fatalf("trailing slash %s", got)
+	}
+	internal := serviceLinkURL("http://127.0.0.1:9080", api, 8000, "ML_SERVICE_URL")
+	if internal != "http://backend:8000/" {
+		t.Fatalf("internal %s", internal)
+	}
+	front := store.Application{ID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee4", Name: "frontend", LocalHost: "frontend"}
+	origin := serviceLinkURL("http://127.0.0.1:9080", front, 3000, "CORS_ORIGIN")
+	if origin != "http://frontend.localhost:9080" {
+		t.Fatalf("origin %s", origin)
+	}
+	joined := store.JoinPublicURL(got, "/api/resumes")
+	if joined != "http://backend.localhost:9080/api/resumes" {
+		t.Fatalf("join %s", joined)
+	}
+}
+
+func TestExplicitDependsOnDoesNotWaitOnUnlistedSibling(t *testing.T) {
+	plan, err := json.Marshal(map[string]any{
+		"services": []map[string]any{
+			{"name": "frontend", "depends_on": []string{"backend"}},
+			{"name": "backend", "depends_on": []string{"ml-model"}},
+			{"name": "ml-model"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := store.SagaView{InSaga: true, ServiceName: "frontend", Plan: plan, Siblings: []store.SagaSibling{
+		{Name: "ml-model", Status: string(store.StatusFailed)},
+		{Name: "backend", Status: string(store.StatusLive)},
+	}}
+	if dependencyFailed(view) != "" {
+		t.Fatal("frontend lists only the backend")
+	}
+	view.Siblings[1].Status = string(store.StatusFailed)
+	if dependencyFailed(view) != "backend" {
+		t.Fatalf("got %s", dependencyFailed(view))
+	}
+}
+
+func TestDependencyFailedStopsLaterBuild(t *testing.T) {
+	mlDown := store.SagaView{InSaga: true, ServiceName: "backend", Siblings: []store.SagaSibling{
+		{Name: "ml-model", Status: string(store.StatusFailed)},
+	}}
+	if dependencyFailed(mlDown) != "ml-model" {
+		t.Fatal("backend must not build after ML failed")
+	}
+	mlDown.Siblings[0].Status = string(store.StatusLive)
+	if dependencyFailed(mlDown) != "" {
+		t.Fatal("a live ML service is not a build stop")
+	}
+	front := store.SagaView{InSaga: true, ServiceName: "frontend", Siblings: []store.SagaSibling{
+		{Name: "backend", Status: string(store.StatusFailed)},
+	}}
+	if dependencyFailed(front) != "backend" {
+		t.Fatal("frontend must not build after the backend failed")
+	}
+	if !dependenciesPending(store.SagaView{InSaga: true, ServiceName: "backend", Siblings: []store.SagaSibling{
+		{Name: "ml-model", Status: string(store.StatusHealthCheck)},
+	}}) {
+		t.Fatal("backend must wait until ML is ready")
 	}
 }
 

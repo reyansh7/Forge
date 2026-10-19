@@ -138,6 +138,16 @@ func (s Sweeper) fail(ctx context.Context, d store.Deployment) error {
 	if err != nil || !ok {
 		return err
 	}
+	// The child row is failed. The project release must fail too, or a
+	// crashed worker leaves the saga on "deploying" until something
+	// happens to read it. Zero rows when this attempt is not a saga.
+	if g, ok := s.Store.(interface {
+		MarkProjectDeployFailed(ctx context.Context, deploymentID, message string) error
+	}); ok {
+		if err := g.MarkProjectDeployFailed(ctx, d.ID, msg); err != nil {
+			s.log().Error("mark project deployment failed", "deployment_id", d.ID, "err", err)
+		}
+	}
 	s.stopAttempt(ctx, d)
 	s.log().Info("closed abandoned deployment", "deployment_id", d.ID, "was", d.Status)
 	return nil
