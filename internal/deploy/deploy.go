@@ -495,12 +495,15 @@ func (h Handler) runBuild(ctx context.Context, d *store.Deployment, app store.Ap
 	}
 	meas.detect = measuredMS(time.Since(detectAt))
 	if err != nil {
-		return detect.Result{}, h.fail(ctx, *d, store.StatusDetecting, err)
+		return detect.Result{}, h.fail(ctx, *d, store.StatusDetecting, withEnvDoctor(buildDir, env, err))
 	}
 	d.RuntimeKind = string(detected.Kind)
 	d.RuntimeType = detected.RuntimeOrDefault()
 	d.PortSource = detected.PortSource
 	d.ListenPort = detected.ListenPort()
+	if err := detect.RejectInvalidExpose(buildDir); err != nil {
+		return detect.Result{}, h.fail(ctx, *d, store.StatusDetecting, withEnvDoctor(buildDir, env, err))
+	}
 	h.log().Info("detect complete",
 		"deployment_id", d.ID,
 		"kind", detected.Kind,
@@ -532,7 +535,10 @@ func (h Handler) runBuild(ctx context.Context, d *store.Deployment, app store.Ap
 			meas.imageBytes = n
 		}
 	}
-	d.BuildLog = store.SanitizeBuildLog(detected.LogLines() + log)
+	// The doctor note is appended so a long Docker log, which is kept
+	// from the tail, does not drop the key-name findings. Values are
+	// not part of the note.
+	d.BuildLog = store.SanitizeBuildLog(detected.LogLines() + log + envDoctor(buildDir, env))
 	d.ImageName = image
 	if err != nil {
 		return detect.Result{}, h.fail(ctx, *d, store.StatusBuilding, err)
@@ -541,6 +547,26 @@ func (h Handler) runBuild(ctx context.Context, d *store.Deployment, app store.Ap
 		return detect.Result{}, err
 	}
 	return detected, nil
+}
+
+// envDoctor compares example-file key names with the keys Forge will
+// inject. Values stay in env and are not passed to the detector.
+func envDoctor(dir string, env []runtime.EnvPair) string {
+	keys := make([]string, 0, len(env))
+	for _, item := range env {
+		if item.Key != "" {
+			keys = append(keys, item.Key)
+		}
+	}
+	return detect.FormatDoctor(detect.CompareEnv(dir, keys, true))
+}
+
+func withEnvDoctor(dir string, env []runtime.EnvPair, err error) error {
+	note := strings.TrimSpace(envDoctor(dir, env))
+	if err == nil || note == "" {
+		return err
+	}
+	return fmt.Errorf("%w\n%s", err, note)
 }
 
 // platformHostStore is optional. Postgres implements it. Unit-test

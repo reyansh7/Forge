@@ -150,6 +150,21 @@ func (m *memApps) PutEnvVar(_ context.Context, applicationID, key, value string)
 	return nil
 }
 
+func (m *memApps) MergeEnvVars(ctx context.Context, applicationID string, vars []store.EnvVar) error {
+	for _, ev := range vars {
+		if err := store.ValidateEnvKey(ev.Key); err != nil {
+			return err
+		}
+		if err := store.ValidateEnvValue(ev.Value); err != nil {
+			return err
+		}
+		if err := m.PutEnvVar(ctx, applicationID, strings.TrimSpace(ev.Key), ev.Value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *memApps) ReplaceEnvVars(_ context.Context, applicationID string, vars []store.EnvVar) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -172,9 +187,10 @@ func (m *memApps) DeleteEnvVar(_ context.Context, applicationID, key string) err
 }
 
 type stubRuntime struct {
-	stopped []string
-	logs    string
-	running bool
+	stopped  []string
+	logs     string
+	running  bool
+	probeErr error
 }
 
 func (s *stubRuntime) Logs(context.Context, string, int) (string, error) { return s.logs, nil }
@@ -190,7 +206,12 @@ func (s *stubRuntime) Stop(_ context.Context, name string) error {
 	s.stopped = append(s.stopped, name)
 	return nil
 }
-func (s *stubRuntime) Running(context.Context, string) (bool, error) { return s.running, nil }
+func (s *stubRuntime) Running(context.Context, string) (bool, error) {
+	if s.probeErr != nil {
+		return false, s.probeErr
+	}
+	return s.running, nil
+}
 
 func appServer(projects ProjectStore, apps ApplicationStore, deps DeploymentStore) *Server {
 	return withAuth(&Server{

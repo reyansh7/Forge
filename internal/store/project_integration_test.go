@@ -151,3 +151,47 @@ func TestProjectCreateGetListAgainstPostgres(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteProjectRemovesApplications(t *testing.T) {
+	pg := postgresForTest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	owner := operatorForTest(t, pg)
+	created, err := pg.CreateProject(ctx, owner.ID, ProjectInput{
+		Name:          "gone-" + time.Now().UTC().Format("150405.000000000"),
+		RepositoryURL: "https://github.com/example/forge-delete.git",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := pg.CreateApplication(ctx, created.ID, ApplicationInput{
+		Name:          "api",
+		RepositoryURL: "https://github.com/example/forge-delete.git",
+		RootDirectory: ".",
+		HealthPath:    "/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.DeleteProject(ctx, created.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pg.GetProject(ctx, created.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("project after delete: %v", err)
+	}
+	if _, err := pg.GetApplication(ctx, app.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("application after project delete: %v", err)
+	}
+	list, err := pg.ListProjects(ctx, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range list {
+		if p.ID == created.ID {
+			t.Fatal("deleted project still listed")
+		}
+	}
+	if err := pg.DeleteProject(ctx, created.ID, owner.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second delete: %v", err)
+	}
+}

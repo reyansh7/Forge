@@ -62,7 +62,10 @@ func TestDiscoverNestedServiceDirs(t *testing.T) {
 	write(t, filepath.Join(dir, "frontend", "package.json"), `{"scripts":{"build":"vite build","start":"node server.js"},"dependencies":{"express":"4.0.0"}}`)
 	write(t, filepath.Join(dir, "frontend", "server.js"), "const express = require('express')\n")
 	write(t, filepath.Join(dir, "frontend", "widget", "package.json"), `{"name":"widget"}`)
-	write(t, filepath.Join(dir, "group", "team", "web", "package.json"), `{"name":"too-deep"}`)
+	write(t, filepath.Join(dir, "group", "team", "web", "package.json"), `{"scripts":{"build":"vite build"},"dependencies":{"react":"18.0.0","react-dom":"18.0.0"},"devDependencies":{"vite":"5.0.0"}}`)
+	write(t, filepath.Join(dir, "group", "team", "web", "index.html"), "<div id=\"root\"></div>\n")
+	deep := filepath.Join(dir, "a", "b", "c", "d", "e", "f", "g", "h", "web")
+	write(t, filepath.Join(deep, "package.json"), `{"name":"past-cap"}`)
 	write(t, filepath.Join(dir, "apps", "node_modules", "leftpad", "package.json"), `{"name":"leftpad"}`)
 
 	got, err := Discover(dir)
@@ -94,8 +97,12 @@ func TestDiscoverNestedServiceDirs(t *testing.T) {
 	if _, ok := byName["frontend/widget"]; ok {
 		t.Fatal("a matched app must not also deploy a nested manifest")
 	}
-	if _, ok := byName["group/team/web"]; ok || byName["group/team"].Deployable {
-		t.Fatal("a third directory level must not be discovered")
+	deepWeb := byName["group/team/web"]
+	if !deepWeb.Deployable || deepWeb.Root != "group/team/web" {
+		t.Fatalf("third level %+v", deepWeb)
+	}
+	if _, ok := byName["a/b/c/d/e/f/g/h/web"]; ok {
+		t.Fatal("a path deeper than eight segments must not be planned")
 	}
 	if _, ok := byName["leftpad"]; ok || byName["apps/node_modules/leftpad"].Deployable {
 		t.Fatal("node_modules must not be a service")

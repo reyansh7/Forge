@@ -65,6 +65,13 @@ func (s *Server) listEnvTemplates(w http.ResponseWriter, r *http.Request) {
 	if templates == nil {
 		templates = []githubapi.EnvTemplate{}
 	}
+	// Example files are hints about key names. Their values are sample
+	// credentials and must not be sent to the dashboard.
+	for i := range templates {
+		for j := range templates[i].Vars {
+			templates[i].Vars[j].Value = ""
+		}
+	}
 	writeJSON(w, http.StatusOK, templates)
 }
 

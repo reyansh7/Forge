@@ -530,27 +530,105 @@ func (p *Postgres) DeleteApplicationGitHubByOwner(ctx context.Context, ownerID s
 	return nil
 }
 
-// ClaimWebhookDelivery returns true when this delivery id is new.
+// BeginWebhookDelivery lets one request own a GitHub delivery.
 //
-// GitHub retries with the same X-GitHub-Delivery. A unique insert is
-// the only lock we need: a crash after insert but before enqueue can
-// drop that push (operator re-delivers or pushes again). Double enqueue
-// is the worse failure.
-func (p *Postgres) ClaimWebhookDelivery(ctx context.Context, deliveryID string) (bool, error) {
+// The insert starts as pending, not as a finished claim. Finish moves
+// it to queued only after a job is accepted, or to failed when enqueue
+// did not. A second request for a pending row gets Busy (HTTP 503).
+// A failed row can be taken over and must reuse its deployment id.
+func (p *Postgres) BeginWebhookDelivery(ctx context.Context, deliveryID string) (WebhookLease, error) {
 	deliveryID = strings.TrimSpace(deliveryID)
 	if deliveryID == "" || len(deliveryID) < 8 || len(deliveryID) > 128 {
-		return false, fmt.Errorf("delivery id is invalid")
+		return WebhookLease{}, fmt.Errorf("delivery id is invalid")
+	}
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WebhookLease{}, fmt.Errorf("begin webhook delivery: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var inserted string
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO github_webhook_deliveries (delivery_id, state, attempt)
+		VALUES ($1, 'pending', 1)
+		ON CONFLICT (delivery_id) DO NOTHING
+		RETURNING state
+	`, deliveryID).Scan(&inserted)
+	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return WebhookLease{}, fmt.Errorf("begin webhook delivery: %w", err)
+		}
+		return WebhookLease{Proceed: true, Attempt: 1}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return WebhookLease{}, fmt.Errorf("begin webhook delivery: %w", err)
+	}
+
+	var state string
+	var attempt int
+	var dep sql.NullString
+	var updated time.Time
+	err = tx.QueryRowContext(ctx, `
+		SELECT state, attempt, deployment_id::text, updated_at
+		FROM github_webhook_deliveries
+		WHERE delivery_id = $1
+		FOR UPDATE
+	`, deliveryID).Scan(&state, &attempt, &dep, &updated)
+	if err != nil {
+		return WebhookLease{}, fmt.Errorf("lock webhook delivery: %w", err)
+	}
+	row := DeliveryRow{
+		Exists: true, State: state, Attempt: attempt, UpdatedAt: updated,
+	}
+	if dep.Valid {
+		row.DeploymentID = dep.String
+	}
+	lease, next := StepWebhookDelivery(time.Now().UTC(), row)
+	if next.Attempt != row.Attempt || next.State != row.State || !next.UpdatedAt.Equal(row.UpdatedAt) {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE github_webhook_deliveries
+			SET state = $2, attempt = $3, updated_at = $4
+			WHERE delivery_id = $1
+		`, deliveryID, next.State, next.Attempt, next.UpdatedAt); err != nil {
+			return WebhookLease{}, fmt.Errorf("update webhook delivery: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return WebhookLease{}, fmt.Errorf("begin webhook delivery: %w", err)
+	}
+	return lease, nil
+}
+
+// FinishWebhookDelivery records the outcome of the attempt that Begin
+// handed out. A stale attempt number changes nothing, so a request
+// that lost the race cannot mark a newer attempt failed.
+func (p *Postgres) FinishWebhookDelivery(ctx context.Context, deliveryID string, attempt int, state, deploymentID string) error {
+	deliveryID = strings.TrimSpace(deliveryID)
+	state = strings.TrimSpace(state)
+	if state != DeliveryQueued && state != DeliveryFailed {
+		return fmt.Errorf("webhook delivery state %q is not a finish state", state)
+	}
+	deploymentID = strings.TrimSpace(deploymentID)
+	if deploymentID != "" {
+		if _, err := ParseUUID(deploymentID); err != nil {
+			return err
+		}
 	}
 	res, err := p.db.ExecContext(ctx, `
-		INSERT INTO github_webhook_deliveries (delivery_id)
-		VALUES ($1)
-		ON CONFLICT (delivery_id) DO NOTHING
-	`, deliveryID)
+		UPDATE github_webhook_deliveries
+		SET state = $3,
+		    deployment_id = NULLIF($4, '')::uuid,
+		    updated_at = now()
+		WHERE delivery_id = $1 AND attempt = $2 AND state = 'pending'
+	`, deliveryID, attempt, state, deploymentID)
 	if err != nil {
-		return false, fmt.Errorf("claim webhook delivery: %w", err)
+		return fmt.Errorf("finish webhook delivery: %w", err)
 	}
 	n, _ := res.RowsAffected()
-	return n == 1, nil
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GitHubCloneToken is the worker fetch credential for this application.

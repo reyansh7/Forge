@@ -2,10 +2,11 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import {
   cancelProjectDeploy,
   createApplication,
+  deleteProject,
   deployProject,
   getProject,
   getProjectDeploy,
@@ -19,9 +20,11 @@ import {
   type Project,
   type ProjectDeploy,
 } from "../../api";
+import { envServiceSlots, ServiceEnvEditors } from "../../service-env";
 
 export default function ProjectPage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const id = params.id;
   const [project, setProject] = useState<Project | null>(null);
   const [apps, setApps] = useState<Application[]>([]);
@@ -31,6 +34,7 @@ export default function ProjectPage() {
   const [repo, setRepo] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState("");
   const [rollout, setRollout] = useState<ProjectDeploy | null>(null);
   const [history, setHistory] = useState<ProjectDeploy[]>([]);
 
@@ -152,6 +156,26 @@ export default function ProjectPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "create failed");
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDeleteProject() {
+    if (!project) {
+      return;
+    }
+    const phrase = `delete this ${project.name}`;
+    if (confirmDelete.trim() !== phrase) {
+      setError(`Type ${phrase} to confirm.`);
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await deleteProject(project.id, phrase);
+      router.push("/");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "delete failed");
       setBusy(false);
     }
   }
@@ -283,10 +307,26 @@ export default function ProjectPage() {
                     {s.package ? ` · ${s.package}` : s.root !== "." ? ` · ${s.root}` : ""}
                     {s.detail ? ` · ${s.detail}` : ""}
                   </span>
+                  {s.diagnoses?.map((d) => (
+                    <span className="project-diagnosis" key={`${d.code}-${d.evidence}`}>
+                      {d.code}: {d.recommendation}
+                    </span>
+                  ))}
                 </div>
               </div>
             ))}
           </div>
+        </div>
+      ) : null}
+
+      {project ? (
+        <div className="card" style={{ marginBottom: "0.85rem" }}>
+          <h2>Environment</h2>
+          <ServiceEnvEditors
+            projectId={id}
+            slots={envServiceSlots(plan, apps)}
+            onSaved={() => void refresh()}
+          />
         </div>
       ) : null}
 
@@ -360,6 +400,37 @@ export default function ProjectPage() {
           </button>
         </div>
       )}
+
+      {project ? (
+        <form
+          className="card danger-zone"
+          style={{ marginTop: "0.85rem" }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            void onDeleteProject();
+          }}
+        >
+          <h2>Delete project</h2>
+          <p className="hint" style={{ marginTop: 0 }}>
+            This removes {project.name} from the project list and deletes its applications, deployments, and environment from the database. Type{" "}
+            <code>delete this {project.name}</code> to confirm.
+          </p>
+          <label htmlFor="delete-project">Confirmation</label>
+          <input
+            id="delete-project"
+            value={confirmDelete}
+            onChange={(e) => setConfirmDelete(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={`delete this ${project.name}`}
+          />
+          <div className="actions">
+            <button className="btn-danger" type="submit" disabled={busy || confirmDelete.trim() !== `delete this ${project.name}`}>
+              {busy ? "Deleting…" : "Delete project"}
+            </button>
+          </div>
+        </form>
+      ) : null}
     </>
   );
 }

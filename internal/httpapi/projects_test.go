@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -64,6 +65,17 @@ func (m *memProjects) CountProjectsByOwner(_ context.Context, ownerID string) (i
 		}
 	}
 	return n, nil
+}
+
+func (m *memProjects) DeleteProject(_ context.Context, id, ownerID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.byID[id]
+	if !ok || p.OwnerID != ownerID {
+		return store.ErrNotFound
+	}
+	delete(m.byID, id)
+	return nil
 }
 
 func (m *memProjects) ListProjects(_ context.Context, ownerID string) ([]store.Project, error) {
@@ -176,6 +188,67 @@ func TestGetProjectInvalidID(t *testing.T) {
 	testHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestDeleteProjectRequiresTypedName(t *testing.T) {
+	mem := newMemProjects()
+	srv := projectServer(mem)
+	created, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "MajorTesr",
+		RepositoryURL: "https://github.com/example/app.git",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/projects/"+created.ID, bytes.NewReader([]byte(`{"confirm":"delete"}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := mem.GetProject(context.Background(), created.ID); err != nil {
+		t.Fatal("wrong phrase must keep the project")
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/projects/"+created.ID, bytes.NewReader([]byte(`{"confirm":"delete this MajorTesr"}`)))
+	testHandler(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := mem.GetProject(context.Background(), created.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("after delete: %v", err)
+	}
+	list, err := mem.ListProjects(context.Background(), testUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range list {
+		if p.ID == created.ID {
+			t.Fatal("deleted project still listed")
+		}
+	}
+}
+
+func TestDeleteProjectOtherOwner(t *testing.T) {
+	mem := newMemProjects()
+	srv := projectServer(mem)
+	created, err := mem.CreateProject(context.Background(), testUserID, store.ProjectInput{
+		Name:          "MajorTesr",
+		RepositoryURL: "https://github.com/example/app.git",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/projects/"+created.ID, bytes.NewReader([]byte(`{"confirm":"delete this MajorTesr"}`)))
+	rec := serveOther(srv, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := mem.GetProject(context.Background(), created.ID); err != nil {
+		t.Fatal("another operator must not delete the project")
 	}
 }
 

@@ -9,6 +9,56 @@ import (
 	"github.com/reyansh7/Forge/internal/secrets"
 )
 
+func TestMergeEnvKeepsOtherApplication(t *testing.T) {
+	pg := postgresForTest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	owner := operatorForTest(t, pg)
+	proj, err := pg.CreateProject(ctx, owner.ID, ProjectInput{
+		Name:          "env-merge-" + time.Now().UTC().Format("150405.000000000"),
+		RepositoryURL: SampleHelloURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pg.db.ExecContext(context.Background(), `DELETE FROM projects WHERE id = $1::uuid`, proj.ID)
+	})
+	client, err := pg.CreateApplication(ctx, proj.ID, ApplicationInput{
+		Name: "client", RepositoryURL: SampleHelloURL, RootDirectory: "client", HealthPath: "/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := pg.CreateApplication(ctx, proj.ID, ApplicationInput{
+		Name: "api", RepositoryURL: SampleHelloURL, RootDirectory: "server", HealthPath: "/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "merge-isolation-secret"
+	if err := pg.PutEnvVar(ctx, server.ID, "DB_PASSWORD", secret); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.PutEnvVar(ctx, client.ID, "VITE_API_URL", "/old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.MergeEnvVars(ctx, client.ID, []EnvVar{{Key: "VITE_API_URL", Value: "/api"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.MergeEnvVars(ctx, client.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := pg.ListEnvVars(ctx, client.ID)
+	if err != nil || len(got) != 1 || got[0].Value != "/api" {
+		t.Fatalf("client %#v %v", got, err)
+	}
+	other, err := pg.ListEnvVars(ctx, server.ID)
+	if err != nil || len(other) != 1 || other[0].Value != secret {
+		t.Fatalf("server %#v %v", other, err)
+	}
+}
+
 func TestEnvVarsEncryptedAtRest(t *testing.T) {
 	// Seal must change the SQL cell. ListEnvVars must still return
 	// plaintext so the worker can inject docker -e. Skip if Postgres

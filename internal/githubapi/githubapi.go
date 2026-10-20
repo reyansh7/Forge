@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -216,9 +217,8 @@ func (c *Client) CreatePushWebhook(ctx context.Context, token, repo, hookURL, se
 
 // EnvExampleVar is one line from a .env.example file.
 //
-// Value is the example text already in git, shown in the form so the
-// operator does not have to upload the file to see it. .env itself is
-// never read.
+// Value is parsed only so keys can be split between folders. The HTTP
+// handler clears it before the response. A committed .env is never read.
 type EnvExampleVar struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
@@ -578,11 +578,18 @@ func (c *Client) fileContents(ctx context.Context, token, repo, path, ref string
 	if err != nil {
 		return "", fmt.Errorf("github file: %w", err)
 	}
+	// Every snapshot file shares this cap. An example environment file
+	// over the cap is skipped by the caller. Any other file fails the
+	// plan rather than being truncated.
 	if len(raw) > 64<<10 {
-		return "", fmt.Errorf("env example is too large")
+		return "", errSnapshotTooLarge
 	}
 	return string(raw), nil
 }
+
+// errSnapshotTooLarge is returned when a GitHub file exceeds the plan
+// download cap. The body is not included in the error.
+var errSnapshotTooLarge = errors.New("snapshot file is too large")
 
 func (c *Client) doLimited(req *http.Request, limit int64) ([]byte, error) {
 	resp, err := c.http().Do(req)

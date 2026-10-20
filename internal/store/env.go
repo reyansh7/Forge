@@ -213,3 +213,83 @@ func (p *Postgres) ReplaceEnvVars(ctx context.Context, applicationID string, var
 	}
 	return nil
 }
+
+// MergeEnvVars upserts the given keys and leaves every other key on
+// the application alone. An empty list is a no-op, so a blank paste
+// cannot delete secrets. Validation runs before the transaction, so a
+// reserved key or a bad value does not change the stored set.
+func (p *Postgres) MergeEnvVars(ctx context.Context, applicationID string, vars []EnvVar) error {
+	applicationID, err := ParseUUID(applicationID)
+	if err != nil {
+		return err
+	}
+	if len(vars) == 0 {
+		return nil
+	}
+	if len(vars) > maxEnvVars {
+		return fmt.Errorf("at most %d environment variables per application", maxEnvVars)
+	}
+	clean := make([]EnvVar, 0, len(vars))
+	seen := make(map[string]struct{}, len(vars))
+	for _, ev := range vars {
+		if err := ValidateEnvKey(ev.Key); err != nil {
+			return err
+		}
+		if err := ValidateEnvValue(ev.Value); err != nil {
+			return err
+		}
+		key := strings.TrimSpace(ev.Key)
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("duplicate env key %s", key)
+		}
+		seen[key] = struct{}{}
+		clean = append(clean, EnvVar{Key: key, Value: ev.Value})
+	}
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT key FROM application_env_vars WHERE application_id = $1::uuid
+	`, applicationID)
+	if err != nil {
+		return fmt.Errorf("count env: %w", err)
+	}
+	defer rows.Close()
+	existing := 0
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return fmt.Errorf("count env: %w", err)
+		}
+		if _, replacing := seen[key]; !replacing {
+			existing++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("count env: %w", err)
+	}
+	if existing+len(clean) > maxEnvVars {
+		return fmt.Errorf("at most %d environment variables per application", maxEnvVars)
+	}
+
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin merge env: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, ev := range clean {
+		stored, err := p.crypter.Seal(ev.Value)
+		if err != nil {
+			return fmt.Errorf("seal env: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO application_env_vars (application_id, key, value)
+			VALUES ($1::uuid, $2, $3)
+			ON CONFLICT (application_id, key)
+			DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+		`, applicationID, ev.Key, stored); err != nil {
+			return fmt.Errorf("merge env: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit merge env: %w", err)
+	}
+	return nil
+}

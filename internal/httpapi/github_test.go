@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/reyansh7/Forge/internal/detect"
 	"github.com/reyansh7/Forge/internal/githubapi"
@@ -24,14 +25,14 @@ type memGitHub struct {
 	account    *store.GitHubAccount
 	bindings   map[string]store.ApplicationGitHub
 	states     map[string]struct{ userID, returnTo string }
-	deliveries map[string]bool
+	deliveries map[string]store.DeliveryRow
 }
 
 func newMemGitHub() *memGitHub {
 	return &memGitHub{
 		bindings:   map[string]store.ApplicationGitHub{},
 		states:     map[string]struct{ userID, returnTo string }{},
-		deliveries: map[string]bool{},
+		deliveries: map[string]store.DeliveryRow{},
 	}
 }
 
@@ -159,14 +160,29 @@ func (m *memGitHub) DeleteApplicationGitHubByOwner(_ context.Context, ownerID st
 	return nil
 }
 
-func (m *memGitHub) ClaimWebhookDelivery(_ context.Context, deliveryID string) (bool, error) {
+func (m *memGitHub) BeginWebhookDelivery(_ context.Context, deliveryID string) (store.WebhookLease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.deliveries[deliveryID] {
-		return false, nil
+	lease, next := store.StepWebhookDelivery(time.Now().UTC(), m.deliveries[deliveryID])
+	m.deliveries[deliveryID] = next
+	return lease, nil
+}
+
+func (m *memGitHub) FinishWebhookDelivery(_ context.Context, deliveryID string, attempt int, state, deploymentID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.deliveries[deliveryID]
+	if !ok || row.Attempt != attempt || row.State != store.DeliveryPending {
+		return store.ErrNotFound
 	}
-	m.deliveries[deliveryID] = true
-	return true, nil
+	if state != store.DeliveryQueued && state != store.DeliveryFailed {
+		return store.ErrNotFound
+	}
+	row.State = state
+	row.DeploymentID = deploymentID
+	row.UpdatedAt = time.Now().UTC()
+	m.deliveries[deliveryID] = row
+	return nil
 }
 
 type stubGitHubAPI struct {
@@ -629,6 +645,115 @@ func TestWebhookPushDeploysEveryServiceOnce(t *testing.T) {
 	if again.ID == view.ID || len(again.Services) != 3 {
 		t.Fatalf("second release %+v", again)
 	}
+}
+
+func TestWebhookEnqueueFailureRetriesSameDeployment(t *testing.T) {
+	srv, gh, app := githubAppFixture(t)
+	jobs := &stubJobs{err: errors.New("redis down")}
+	srv.Jobs = jobs
+	bindWebhook(t, gh, app.ID)
+	body := pushBody("refs/heads/main", "abc1234dead", "octo/hello", false)
+	delivery := "77777777-7777-4777-8777-777777777777"
+
+	first := postWebhook(srv, app.ID, delivery, body)
+	if first.Code != http.StatusServiceUnavailable {
+		t.Fatalf("first status = %d body=%s", first.Code, first.Body.String())
+	}
+	if n := deploymentCount(t, srv); n != 1 {
+		t.Fatalf("deployments after failure = %d", n)
+	}
+
+	jobs.err = nil
+	second := postWebhook(srv, app.ID, delivery, body)
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("retry status = %d body=%s", second.Code, second.Body.String())
+	}
+	if n := deploymentCount(t, srv); n != 1 {
+		t.Fatalf("retry created another deployment: %d", n)
+	}
+	if jobs.last.Type != "deploy" {
+		t.Fatalf("job type %s", jobs.last.Type)
+	}
+
+	third := postWebhook(srv, app.ID, delivery, body)
+	if third.Code != http.StatusOK || !strings.Contains(third.Body.String(), "duplicate") {
+		t.Fatalf("third status = %d body=%s", third.Code, third.Body.String())
+	}
+	if n := deploymentCount(t, srv); n != 1 {
+		t.Fatalf("duplicate created a deployment: %d", n)
+	}
+}
+
+func TestWebhookIgnoredEventsDoNotConsumeDelivery(t *testing.T) {
+	srv, gh, app := githubAppFixture(t)
+	bindWebhook(t, gh, app.ID)
+	delivery := "88888888-8888-4888-8888-888888888888"
+
+	tag := postWebhook(srv, app.ID, delivery, pushBody("refs/tags/v1", "abc1234dead", "octo/hello", false))
+	if tag.Code != http.StatusOK || !strings.Contains(tag.Body.String(), "branch") {
+		t.Fatalf("tag status = %d body=%s", tag.Code, tag.Body.String())
+	}
+	deleted := postWebhook(srv, app.ID, delivery, pushBody("refs/heads/main", "0000000", "octo/hello", true))
+	if deleted.Code != http.StatusOK || !strings.Contains(deleted.Body.String(), "branch") {
+		t.Fatalf("deleted status = %d body=%s", deleted.Code, deleted.Body.String())
+	}
+	other := postWebhook(srv, app.ID, delivery, pushBody("refs/heads/main", "abc1234dead", "octo/other", false))
+	if other.Code != http.StatusOK || !strings.Contains(other.Body.String(), "repo") {
+		t.Fatalf("repo status = %d body=%s", other.Code, other.Body.String())
+	}
+	ok := postWebhook(srv, app.ID, delivery, pushBody("refs/heads/main", "abc1234dead", "octo/hello", false))
+	if ok.Code != http.StatusAccepted {
+		t.Fatalf("push after ignores = %d body=%s", ok.Code, ok.Body.String())
+	}
+	if n := deploymentCount(t, srv); n != 1 {
+		t.Fatalf("deployments = %d", n)
+	}
+}
+
+func bindWebhook(t *testing.T, gh *memGitHub, appID string) {
+	t.Helper()
+	_, err := gh.UpsertApplicationGitHub(context.Background(), store.ApplicationGitHub{
+		ApplicationID: appID,
+		OwnerID:       testUserID,
+		RepoFullName:  "octo/hello",
+		Branch:        "main",
+		Environment:   store.EnvProduction,
+		WebhookSecret: "hook-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func pushBody(ref, sha, repo string, deleted bool) []byte {
+	raw := map[string]any{
+		"ref": ref, "after": sha, "deleted": deleted,
+		"repository":  map[string]string{"full_name": repo},
+		"head_commit": map[string]any{"id": sha, "message": "ship it", "author": map[string]string{"name": "Ada"}},
+	}
+	body, err := json.Marshal(raw)
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+func postWebhook(srv *Server, appID, delivery string, body []byte) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github/"+appID, bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-GitHub-Delivery", delivery)
+	req.Header.Set("X-Hub-Signature-256", signBody("hook-secret", body))
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func deploymentCount(t *testing.T, srv *Server) int {
+	t.Helper()
+	deps := srv.Deployments.(*memDeployments)
+	deps.mu.Lock()
+	defer deps.mu.Unlock()
+	return len(deps.byID)
 }
 
 func boolPtr(v bool) *bool { return &v }

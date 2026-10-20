@@ -38,7 +38,8 @@ type GitHubStore interface {
 	ListApplicationGitHubByOwner(ctx context.Context, ownerID string) ([]store.ApplicationGitHub, error)
 	DeleteApplicationGitHub(ctx context.Context, applicationID string) error
 	DeleteApplicationGitHubByOwner(ctx context.Context, ownerID string) error
-	ClaimWebhookDelivery(ctx context.Context, deliveryID string) (bool, error)
+	BeginWebhookDelivery(ctx context.Context, deliveryID string) (store.WebhookLease, error)
+	FinishWebhookDelivery(ctx context.Context, deliveryID string, attempt int, state, deploymentID string) error
 }
 
 type githubStatusResponse struct {

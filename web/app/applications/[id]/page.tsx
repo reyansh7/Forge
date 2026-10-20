@@ -27,14 +27,11 @@ import {
   listApplications,
   listDomains,
   listEnv,
-  listEnvTemplates,
   listLinks,
   listNodes,
   listVolumes,
-  mergeEnv,
-  parseDotEnvDetailed,
+  projectPlan,
   putEnv,
-  replaceEnv,
   retryDeployment,
   rollbackDeployment,
   restartApplication,
@@ -45,13 +42,13 @@ import {
   type Application,
   type DeployEnvironment,
   type Deployment,
-  type EnvTemplate,
   type EnvVar,
+  type PlanService,
   type AppDomain,
   type AppVolume,
   type ServiceLink,
 } from "../../api";
-import { EnvTemplates } from "../../env-templates";
+import { envServiceSlots, ServiceEnvEditors } from "../../service-env";
 import {
   elapsedSince,
   formatDuration,
@@ -65,6 +62,7 @@ import {
   workerUnresponsiveNote,
 } from "../../status";
 import type { WorkerNode } from "../../api";
+import { GitHubBinding } from "../../github-binding";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -106,7 +104,8 @@ export default function ApplicationPage() {
   const [historyLimit, setHistoryLimit] = useState(25);
   const [logQuery, setLogQuery] = useState("");
   const [env, setEnv] = useState<EnvVar[]>([]);
-  const [repoEnv, setRepoEnv] = useState<EnvTemplate[] | null>(null);
+  const [projectApps, setProjectApps] = useState<Application[]>([]);
+  const [servicePlan, setServicePlan] = useState<PlanService[] | null>(null);
   const [links, setLinks] = useState<ServiceLink[]>([]);
   const [volumes, setVolumes] = useState<AppVolume[]>([]);
   const [domains, setDomains] = useState<AppDomain[]>([]);
@@ -130,8 +129,6 @@ export default function ApplicationPage() {
   const [healthTimeout, setHealthTimeout] = useState("");
   const [envKey, setEnvKey] = useState("");
   const [envValue, setEnvValue] = useState("");
-  const [envBulk, setEnvBulk] = useState("");
-  const [envFileName, setEnvFileName] = useState("");
   const [showEnv, setShowEnv] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
@@ -161,13 +158,21 @@ export default function ApplicationPage() {
     setVolumes(vols);
     setDomains(doms);
     try {
-      const others = (await listApplications(a.project_id)).filter((x) => x.id !== a.id);
+      const all = await listApplications(a.project_id);
+      setProjectApps(all);
+      const others = all.filter((x) => x.id !== a.id);
       setSiblings(others);
       if (!linkTarget && others[0]) {
         setLinkTarget(others[0].id);
       }
     } catch {
+      setProjectApps([]);
       setSiblings([]);
+    }
+    try {
+      setServicePlan(await projectPlan(a.project_id));
+    } catch {
+      setServicePlan([]);
     }
     try {
       setHealth(await getApplicationHealth(id, slot));
@@ -177,19 +182,17 @@ export default function ApplicationPage() {
   }
 
   useEffect(() => {
+    // Observe links here with #logs or #deployments. The hash is only a
+    // tab name; it does not authorize anything. The API still checks
+    // the session on every read.
+    const hash = window.location.hash.replace(/^#/, "");
+    if (TABS.some((item) => item.id === hash)) {
+      setTab(hash as Tab);
+    }
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
-    setRepoEnv(null);
-    void listEnvTemplates(id)
-      .then((list) => {
-        if (!cancelled) {
-          setRepoEnv(list);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setRepoEnv([]);
-        }
-      });
     void (async () => {
       try {
         await refresh();
@@ -558,40 +561,6 @@ export default function ApplicationPage() {
     }
   }
 
-  const envParsed = parseDotEnvDetailed(envBulk);
-
-  async function applyEnvFile(mode: "merge" | "replace") {
-    setBusy("envbulk");
-    setError("");
-    try {
-      if (envParsed.vars.length === 0) {
-        throw new Error("no KEY=VALUE lines found in the pasted or uploaded file");
-      }
-      const vars = mode === "merge" ? mergeEnv(env, envParsed.vars) : envParsed.vars;
-      setEnv(await replaceEnv(id, vars));
-      setEnvBulk("");
-      setEnvFileName("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "env import failed");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function onEnvFile(file: File | undefined) {
-    if (!file) {
-      return;
-    }
-    if (file.size > 256 * 1024) {
-      setError("env file must be at most 256 KB");
-      return;
-    }
-    setError("");
-    const text = await file.text();
-    setEnvBulk(text);
-    setEnvFileName(file.name);
-  }
-
   async function onDeleteEnv(key: string) {
     setError("");
     try {
@@ -842,6 +811,8 @@ export default function ApplicationPage() {
             </div>
           </div>
 
+          <GitHubBinding applicationId={id} />
+
           <div className="card">
             <h2>{pending ? "Current attempt" : "Latest attempt"}</h2>
             {(pending ?? latest) ? (
@@ -1064,12 +1035,19 @@ export default function ApplicationPage() {
             requires a new deploy, not just a running container. PORT and reserved
             Forge keys are rejected.
           </p>
-          <EnvTemplates applicationId={id} templates={repoEnv} onSaved={() => void refresh()} />
-          {repoEnv === null ? null : env.length === 0 && repoEnv.length === 0 ? (
+          {app ? (
+            <ServiceEnvEditors
+              projectId={app.project_id}
+              slots={envServiceSlots(servicePlan, projectApps)}
+              onSaved={() => void refresh()}
+            />
+          ) : null}
+          <p className="hint">Stored keys for this application. Remove deletes that key. The paste boxes above do not.</p>
+          {env.length === 0 ? (
             <p className="empty" style={{ marginTop: "0.85rem" }}>
-              No variables yet.
+              No variables stored yet.
             </p>
-          ) : env.length === 0 ? null : (
+          ) : (
             <table className="env-table" style={{ marginTop: "0.75rem" }}>
               <thead>
                 <tr>
@@ -1095,8 +1073,6 @@ export default function ApplicationPage() {
               </tbody>
             </table>
           )}
-          {repoEnv === null ? null : (
-          <>
           <form onSubmit={onEnv} style={{ marginTop: "1rem" }}>
             <div className="env-row">
               <input
@@ -1116,74 +1092,6 @@ export default function ApplicationPage() {
               </button>
             </div>
           </form>
-          <form
-            className="env-import"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void applyEnvFile("merge");
-            }}
-          >
-            <label htmlFor="env-bulk">Import a .env file</label>
-            <p className="hint" style={{ marginTop: "0.35rem" }}>
-              Upload a file or paste the whole contents. Comments, quotes, and
-              <code> export KEY=value</code> lines are accepted. Import keeps existing
-              keys and overwrites matches. Replace all drops keys that are not in the file.
-            </p>
-            <div className="actions-row" style={{ margin: "0.65rem 0" }}>
-              <label className="btn btn-ghost env-file-btn">
-                {envFileName ? envFileName : "Choose .env file"}
-                <input
-                  type="file"
-                  accept=".env,.env.*,text/plain"
-                  onChange={(e) => {
-                    void onEnvFile(e.target.files?.[0]);
-                    e.target.value = "";
-                  }}
-                />
-              </label>
-            </div>
-            <textarea
-              id="env-bulk"
-              value={envBulk}
-              onChange={(e) => {
-                setEnvBulk(e.target.value);
-                if (envFileName) {
-                  setEnvFileName("");
-                }
-              }}
-              placeholder={'VITE_APP_EMAILJS_PUBLIC_KEY=...\nDATABASE_URL="postgres://..."\n# comments are ignored'}
-              aria-label="dotenv file contents"
-            />
-            {envBulk.trim() ? (
-              <p className="env-preview">
-                {envParsed.vars.length === 0
-                  ? "No variables detected yet."
-                  : `Detected ${envParsed.vars.length} variable${envParsed.vars.length === 1 ? "" : "s"}: ${envParsed.vars.map((v) => v.key).join(", ")}`}
-                {envParsed.skipped.length > 0 ? (
-                  <>
-                    <br />
-                    Skipped: {envParsed.skipped.slice(0, 6).join("; ")}
-                    {envParsed.skipped.length > 6 ? "…" : ""}
-                  </>
-                ) : null}
-              </p>
-            ) : null}
-            <div className="actions-row" style={{ marginTop: "0.65rem" }}>
-              <button className="btn-primary" type="submit" disabled={!!busy || envParsed.vars.length === 0}>
-                {busy === "envbulk" ? "Saving…" : "Import variables"}
-              </button>
-              <button
-                className="btn-ghost"
-                type="button"
-                disabled={!!busy || envParsed.vars.length === 0}
-                onClick={() => void applyEnvFile("replace")}
-              >
-                Replace all
-              </button>
-            </div>
-          </form>
-          </>
-          )}
         </div>
       ) : null}
 

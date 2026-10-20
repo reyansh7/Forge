@@ -321,6 +321,38 @@ func (p *Postgres) ListProjects(ctx context.Context, ownerID string) ([]Project,
 	return out, nil
 }
 
+// DeleteProject removes one project owned by ownerID.
+//
+// The owner predicate is part of the statement so a handler bug cannot
+// delete another operator's row by id alone. applications, deployments,
+// env vars, links, volume rows, domains, GitHub bindings, project
+// deployments, and build-cache rows leave with ON DELETE CASCADE.
+// This statement does not stop containers or remove Docker volumes;
+// the HTTP handler does that first. A missing row and a wrong owner
+// are both ErrNotFound.
+func (p *Postgres) DeleteProject(ctx context.Context, id, ownerID string) error {
+	id, err := ParseUUID(id)
+	if err != nil {
+		return err
+	}
+	ownerID, err = ParseUUID(ownerID)
+	if err != nil {
+		return err
+	}
+	res, err := p.db.ExecContext(ctx, `
+		DELETE FROM projects
+		WHERE id = $1::uuid AND owner_id = $2::uuid
+	`, id, ownerID)
+	if err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // CountProjectsByOwner is the Phase 5 project quota.
 func (p *Postgres) CountProjectsByOwner(ctx context.Context, ownerID string) (int, error) {
 	ownerID, err := ParseUUID(ownerID)

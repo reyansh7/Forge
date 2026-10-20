@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/reyansh7/Forge/internal/detect"
 )
 
 func TestWriteDiscoverTreeSeesNestedServicesAndGoCmd(t *testing.T) {
@@ -81,11 +83,125 @@ func TestWriteDiscoverTreeSeesNestedServicesAndGoCmd(t *testing.T) {
 	}
 }
 
+func TestWriteDiscoverTreeSeesThirdLevel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/repos/acme/demo/contents/"), "/")
+		w.Header().Set("Content-Type", "application/json")
+		switch path {
+		case "":
+			_ = json.NewEncoder(w).Encode([]contentEntry{dirEntry("group")})
+		case "group":
+			_ = json.NewEncoder(w).Encode([]contentEntry{dirEntry("group/team")})
+		case "group/team":
+			_ = json.NewEncoder(w).Encode([]contentEntry{dirEntry("group/team/web")})
+		case "group/team/web":
+			_ = json.NewEncoder(w).Encode([]contentEntry{
+				fileEntry("package.json", "group/team/web/package.json"),
+				dirEntry("group/team/web/src"),
+			})
+		case "group/team/web/package.json":
+			_ = json.NewEncoder(w).Encode(fileEntry("package.json", "group/team/web/package.json"))
+		case "group/team/web/src":
+			t.Error("source inside a service must not be listed")
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected contents path %q", path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	dest := t.TempDir()
+	c := &Client{HTTP: srv.Client(), APIBase: srv.URL}
+	if err := c.WriteDiscoverTree(context.Background(), "token", "acme/demo", "main", dest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "group", "team", "web", "package.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDiscoverTreeExampleValuesStayOutOfThePlan(t *testing.T) {
+	secret := "snapshot-example-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/repos/acme/demo/contents/"), "/")
+		w.Header().Set("Content-Type", "application/json")
+		switch path {
+		case "":
+			_ = json.NewEncoder(w).Encode([]contentEntry{dirEntry("api")})
+		case "api":
+			_ = json.NewEncoder(w).Encode([]contentEntry{
+				fileEntry("Dockerfile", "api/Dockerfile"),
+				fileBody("api/.env.example", "DB_PASSWORD="+secret+"\n"),
+			})
+		case "api/Dockerfile":
+			_ = json.NewEncoder(w).Encode(fileBody("api/Dockerfile", "FROM scratch\nEXPOSE 8080\n"))
+		case "api/.env.example":
+			_ = json.NewEncoder(w).Encode(fileBody("api/.env.example", "DB_PASSWORD="+secret+"\n"))
+		default:
+			t.Errorf("unexpected contents path %q", path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	dest := t.TempDir()
+	c := &Client{HTTP: srv.Client(), APIBase: srv.URL}
+	if err := c.WriteDiscoverTree(context.Background(), "token", "acme/demo", "main", dest); err != nil {
+		t.Fatal(err)
+	}
+	services, err := detect.Discover(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Fatal("plan JSON contained the example file value")
+	}
+	if !strings.Contains(string(raw), "env_declared") || !strings.Contains(string(raw), "DB_PASSWORD") {
+		t.Fatal("plan did not name the example key")
+	}
+}
+
+func TestDiscoverTreeSkipsOversizedExample(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/repos/acme/demo/contents/"), "/")
+		w.Header().Set("Content-Type", "application/json")
+		switch path {
+		case "":
+			_ = json.NewEncoder(w).Encode([]contentEntry{fileBody(".env.example", strings.Repeat("A", 70<<10))})
+		case ".env.example":
+			_ = json.NewEncoder(w).Encode(fileBody(".env.example", strings.Repeat("A", 70<<10)))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	dest := t.TempDir()
+	c := &Client{HTTP: srv.Client(), APIBase: srv.URL}
+	if err := c.WriteDiscoverTree(context.Background(), "token", "acme/demo", "main", dest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, ".env.example")); !os.IsNotExist(err) {
+		t.Fatal("an example file over 64 KiB must not be saved")
+	}
+}
+
 func dirEntry(path string) contentEntry {
 	return contentEntry{Name: filepath.Base(path), Path: path, Type: "dir"}
 }
 
 func fileEntry(name, path string) contentEntry {
-	body := base64.StdEncoding.EncodeToString([]byte("ok\n"))
-	return contentEntry{Name: name, Path: path, Type: "file", Encoding: "base64", Content: body}
+	return fileBody(path, "ok\n")
+}
+
+func fileBody(path, body string) contentEntry {
+	return contentEntry{
+		Name:     filepath.Base(path),
+		Path:     path,
+		Type:     "file",
+		Encoding: "base64",
+		Content:  base64.StdEncoding.EncodeToString([]byte(body)),
+	}
 }

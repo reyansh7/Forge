@@ -107,13 +107,28 @@ func TestGitHubAccountAndBindingAgainstPostgres(t *testing.T) {
 	}
 
 	deliveryID := "delivery-" + time.Now().UTC().Format("150405.000000000")
-	fresh, err := pg.ClaimWebhookDelivery(ctx, deliveryID)
-	if err != nil || !fresh {
-		t.Fatalf("first claim: %v %v", fresh, err)
+	lease, err := pg.BeginWebhookDelivery(ctx, deliveryID)
+	if err != nil || !lease.Proceed || lease.Attempt != 1 {
+		t.Fatalf("first begin: %+v %v", lease, err)
 	}
-	fresh, err = pg.ClaimWebhookDelivery(ctx, deliveryID)
-	if err != nil || fresh {
-		t.Fatalf("dup claim must be false: %v %v", fresh, err)
+	if err := pg.FinishWebhookDelivery(ctx, deliveryID, lease.Attempt, DeliveryQueued, ""); err != nil {
+		t.Fatal(err)
+	}
+	again, err := pg.BeginWebhookDelivery(ctx, deliveryID)
+	if err != nil || again.Proceed || again.Busy {
+		t.Fatalf("finished delivery must not run again: %+v %v", again, err)
+	}
+	failedID := deliveryID + "-retry"
+	failed, err := pg.BeginWebhookDelivery(ctx, failedID)
+	if err != nil || !failed.Proceed {
+		t.Fatalf("failed-path begin: %+v %v", failed, err)
+	}
+	if err := pg.FinishWebhookDelivery(ctx, failedID, failed.Attempt, DeliveryFailed, ""); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := pg.BeginWebhookDelivery(ctx, failedID)
+	if err != nil || !recovered.Proceed || !recovered.Recover {
+		t.Fatalf("failed delivery was not recoverable: %+v %v", recovered, err)
 	}
 
 	d, err := pg.CreateDeploymentIn(ctx, apps[0].ID, EnvProduction)

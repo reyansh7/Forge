@@ -33,6 +33,9 @@ type Service struct {
 	Volumes    []ServiceVol `json:"volumes,omitempty"`
 	Deployable bool         `json:"deployable"`
 	Detail     string       `json:"detail"`
+	// Diagnoses are read-only environment findings. Values from example
+	// files are not included.
+	Diagnoses []Diagnosis `json:"diagnoses,omitempty"`
 }
 
 // ServiceEnv is a generated variable. It is not an operator secret.
@@ -51,16 +54,26 @@ type ServiceVol struct {
 	Path string `json:"path"`
 }
 
+// maxDiscoverDepth is the deepest parent walk. A child classified at
+// that depth has eight path segments (group/team/web is three). Deeper
+// trees are reported as a preflight cap instead of being scanned
+// without a bound. node_modules, vendor, and the other skip names are
+// never entered.
+const maxDiscoverDepth = 7
+
+// maxDiscoverServices matches the forge.yaml service cap. Past this,
+// further roots are not deployed and one preflight row explains the cap.
+const maxDiscoverServices = 16
+
 // Discover lists services in a repository without running user code.
 //
-// It classifies the root and each child directory. A child that is not
-// itself a service is opened once more, so apps/web and services/api
-// are found. A directory that already matched is not opened again, so
-// frontend/src and a Node app's own packages stay part of that app.
-// Deeper than that (group/team/web) is not discovered. node_modules,
-// vendor, VCS, and virtualenv folders are not services. A Go module
-// with cmd/api and cmd/worker becomes two services. A module with no
-// main package is reported as a library, not deployed.
+// It classifies the root and walks directories that are not themselves
+// services, so apps/web and group/team/web are found. A directory that
+// already matched is not opened again, so frontend/src stays part of
+// that app. node_modules, vendor, VCS, and virtualenv folders are not
+// services. A Go module with cmd/api and cmd/worker becomes two
+// services. A module with no main package is reported as a library,
+// not deployed. forge.yaml, when present, replaces this walk.
 func Discover(root string) ([]Service, error) {
 	if fileExists(filepath.Join(root, "forge.yaml")) {
 		// The manifest is the plan. Heuristic discovery must not add
@@ -97,10 +110,11 @@ func Discover(root string) ([]Service, error) {
 }
 
 // discoverNested lists child directories of rel. depth 0 is the
-// repository root. When a child adds no service, depth 1 looks inside
-// it. depth stops there: the walk is not a full recursive scan.
+// repository root. A child that is not a service is opened again, up
+// to maxDiscoverDepth. A child that is a service is not opened, so its
+// source tree is not a second application.
 func discoverNested(repo, rel string, depth int, out *[]Service) error {
-	if depth > 1 {
+	if depth > maxDiscoverDepth {
 		return nil
 	}
 	dir := repo
@@ -112,6 +126,9 @@ func discoverNested(repo, rel string, depth int, out *[]Service) error {
 		return err
 	}
 	for _, name := range names {
+		if serviceCapReached(out) {
+			return nil
+		}
 		// cmd/ under a root go.mod is that module's programs, already
 		// emitted by discoverAt on ".".
 		if rel == "." && name == "cmd" && fileExists(filepath.Join(repo, "go.mod")) {
@@ -125,13 +142,37 @@ func discoverNested(repo, rel string, depth int, out *[]Service) error {
 		if err := discoverAt(repo, child, out); err != nil {
 			return err
 		}
-		if len(*out) == before && depth < 1 {
+		if len(*out) == before {
 			if err := discoverNested(repo, child, depth+1, out); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func serviceCapReached(out *[]Service) bool {
+	n := 0
+	capped := false
+	for _, svc := range *out {
+		if svc.Name == "preflight" {
+			capped = true
+			continue
+		}
+		n++
+	}
+	if n < maxDiscoverServices {
+		return false
+	}
+	if !capped {
+		*out = append(*out, Service{
+			Name:       "preflight",
+			Root:       ".",
+			Deployable: false,
+			Detail:     "preflight_service_cap: more than 16 service roots were found. The rest were not planned. Split the repository or name the services in forge.yaml.",
+		})
+	}
+	return true
 }
 
 func listDiscoverDirs(dir string) ([]string, error) {
@@ -165,7 +206,12 @@ func discoverAt(repo, rel string, out *[]Service) error {
 		return nil
 	}
 	if idx.has("go.mod") {
-		*out = append(*out, goServices(rel, idx)...)
+		svcs := goServices(rel, idx)
+		diags := CompareEnv(dir, nil, false)
+		for i := range svcs {
+			svcs[i].Diagnoses = diags
+		}
+		*out = append(*out, svcs...)
 		return nil
 	}
 	got, err := Tree(dir)
@@ -174,10 +220,23 @@ func discoverAt(repo, rel string, out *[]Service) error {
 			Name:       serviceName(rel, ""),
 			Root:       rel,
 			Deployable: false,
-			Detail:     err.Error(),
+			Detail:     preflightDetail(rel, err),
+			Diagnoses:  CompareEnv(dir, nil, false),
 		})
 		return nil
 	}
+	if portErr := RejectInvalidExpose(dir); portErr != nil {
+		*out = append(*out, Service{
+			Name:       serviceName(rel, ""),
+			Root:       rel,
+			Kind:       string(got.Kind),
+			Deployable: false,
+			Detail:     portErr.Error(),
+			Diagnoses:  CompareEnv(dir, nil, false),
+		})
+		return nil
+	}
+	diags := CompareEnv(dir, nil, false)
 	*out = append(*out, Service{
 		Name:       serviceName(rel, ""),
 		Root:       rel,
@@ -187,6 +246,7 @@ func discoverAt(repo, rel string, out *[]Service) error {
 		Port:       got.ListenPort(),
 		Deployable: true,
 		Detail:     got.Source.Reason,
+		Diagnoses:  diags,
 	})
 	return nil
 }

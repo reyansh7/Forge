@@ -210,6 +210,16 @@ export function createProject(name: string, repository_url: string): Promise<Pro
   }).then((r) => parse<Project>(r));
 }
 
+export type PlanDiagnosis = {
+  code: string;
+  stage: string;
+  evidence: string;
+  confidence: string;
+  recommendation: string;
+  risk: string;
+  blocking: boolean;
+};
+
 export type PlanService = {
   name: string;
   root: string;
@@ -220,6 +230,7 @@ export type PlanService = {
   port?: number;
   deployable: boolean;
   detail: string;
+  diagnoses?: PlanDiagnosis[];
 };
 
 export function projectPlan(id: string): Promise<PlanService[]> {
@@ -330,6 +341,39 @@ export function updateApplication(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }).then((r) => parse<Application>(r));
+}
+
+export type EnvPasteResult = {
+  directory: string;
+  application_id?: string;
+  name?: string;
+  saved: { key: string; class: string }[];
+  kept: string[];
+  issues: string[];
+  warnings: string[];
+};
+
+export function saveProjectEnv(
+  projectId: string,
+  services: { directory: string; text: string }[],
+): Promise<EnvPasteResult[]> {
+  return apiFetch(`/forge-api/projects/${projectId}/env`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ services }),
+  }).then((r) => parse<EnvPasteResult[]>(r));
+}
+
+export function deleteProject(id: string, confirm: string): Promise<void> {
+  return apiFetch(`/forge-api/projects/${id}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm }),
+  }).then((r) => {
+    if (!r.ok && r.status !== 204) {
+      return parse<void>(r);
+    }
+  });
 }
 
 export function deleteApplication(id: string): Promise<void> {
@@ -451,18 +495,51 @@ export function rollbackDeployment(sourceId: string): Promise<Deployment> {
 
 export { mergeEnv, parseDotEnv, parseDotEnvDetailed } from "./dotenv";
 
+export type ObserveService = {
+  application_id: string;
+  application_name: string;
+  project_id: string;
+  environment: string;
+  health: string;
+  health_reason: string;
+  release_id?: string;
+  release_status?: string;
+  release_sha?: string;
+  attempts: number;
+  container: string;
+  status_at?: string;
+  failed_deployment_id?: string;
+  failed_stage?: string;
+  failed_reason?: string;
+  restart_count: string;
+  restart_count_reason: string;
+  resources: string;
+  resources_reason: string;
+  uptime: string;
+  uptime_reason: string;
+};
+
 export type ObserveMetrics = {
   http_requests_total: number;
   http_errors_total: number;
   deploys_queued_total: number;
+  started_at?: string;
+  collected_at?: string;
+  counter_scope?: string;
   deployments_total: number;
   deployments_live: number;
   deployments_failed: number;
+  deployments_in_progress?: number;
+  applications_observed?: number;
+  applications_unique?: number;
   last_deploy_duration_ms: number;
   containers_running: number;
   containers_checked: number;
   nodes_ready: number;
   nodes_dead: number;
+  queue_depth?: string;
+  queue_depth_reason?: string;
+  services?: ObserveService[];
 };
 
 export type WorkerNode = {

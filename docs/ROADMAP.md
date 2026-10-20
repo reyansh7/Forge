@@ -38,7 +38,7 @@ Future-phase work must not be implemented merely because it is known to be requi
 
 | Kind | Phases | Meaning |
 |------|--------|---------|
-| **CURRENT** | 0, 1, 2, 3, 4, 5, 6, 7.1–7.14 | Implemented through Phase 6 plus Phase 7 increments 7.1–7.14 (through project Deploy All, workspace diagnostics, nested service discovery, post-fetch Git metadata cleanup, and a content-addressed image index). AWS apply is still operator work (`docs/AWS.md`). |
+| **CURRENT** | 0, 1, 2, 3, 4, 5, 6, 7.1–7.16 | Implemented through Phase 6 plus Phase 7 increments 7.1–7.16 (through the deployment doctor). AWS apply is still operator work (`docs/AWS.md`). |
 | **NEXT** | 7 (further increments) | Remaining Phase 7 items only after the developer names the increment (or `START PHASE 7` again with a pick). |
 | **FUTURE** | 8–10 | Documented sequence. Not authorized. |
 
@@ -54,7 +54,7 @@ Security requirements apply in every phase. Phases 3 and 5 add **depth**; they d
 4 Observability             COMPLETE
 5 Production hardening      COMPLETE
 6 Multi-node infrastructure   COMPLETE
-7 Advanced platform          IN PROGRESS (7.1–7.14)
+7 Advanced platform          IN PROGRESS (7.1–7.16)
 8 Cloud / AWS readiness
 9 High availability / scaling
 10 Multi-region / operational intelligence
@@ -336,7 +336,7 @@ A second worker process (`FORGE_NODE_NAME` + join token) consumes `forge:jobs:{i
 
 ## 10. Phase 7 — Advanced Platform Capabilities
 
-**Status: IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.14 are done (service links, volumes, preview/production, rolling, env-isolated volumes, custom domains + ACME, GitHub OAuth + webhooks + auto deploy, deployment lease and recovery sweep, personal allowlist and platform hostnames, project Deploy All, workspace diagnostics and stage timings, nested service discovery, post-fetch Git metadata cleanup, content-addressed image reuse). Nested discovery opens one additional directory level when the parent directory is not itself a service. A third level is not discovered. Nested service discovery is not build caching. After fetch, the worker removes `.git` before the workspace quota. The quota value is unchanged, application files are kept, and a cleanup failure stops the deploy before build. That cleanup does not shrink the Git download. Cron, team RBAC, canary, managed application datastores, build cache, and hooks are not implemented. The Postgres backup drill is not complete. AWS is documented in `docs/AWS.md` and has not been applied. Do not implement the rest of the list until the developer picks the next increment.
+**Status: IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.16 are done (service links, volumes, preview/production, rolling, env-isolated volumes, custom domains + ACME, GitHub OAuth + webhooks + auto deploy, deployment lease and recovery sweep, personal allowlist and platform hostnames, project Deploy All, workspace diagnostics and stage timings, nested service discovery, post-fetch Git metadata cleanup, content-addressed image reuse, deeper discovery and preflight, deployment doctor). Nested discovery walks directories that are not themselves services, up to eight path segments (increment 7.15). A ninth segment is not discovered. Nested service discovery is not build caching. After fetch, the worker removes `.git` before the workspace quota. The quota value is unchanged, application files are kept, and a cleanup failure stops the deploy before build. That cleanup does not shrink the Git download. Cron, team RBAC, canary, managed application datastores, a shared dependency cache, a Git mirror, resumable builds, production Compose image pulls, and hooks are not implemented. The Postgres backup drill is not complete. AWS is documented in `docs/AWS.md` and has not been applied. Do not implement the rest of the list until the developer picks the next increment.
 
 ### Objective
 
@@ -372,9 +372,9 @@ Operator adds a public hostname to an application environment. The name is uniqu
 
 ### Increment 7.7 — GitHub OAuth + webhooks + auto deploy (COMPLETE)
 
-Operators connect a GitHub account (OAuth App via `FORGE_GITHUB_CLIENT_ID` / `FORGE_GITHUB_CLIENT_SECRET`), pick owner/repo + branch, and Forge creates a `push` webhook. Tokens and webhook secrets are sealed at rest and never returned to the dashboard. `POST /webhooks/github/{application_id}` is public but HMAC-verified (`X-Hub-Signature-256`). Duplicate `X-GitHub-Delivery` is ignored. A matching branch push creates a queued deployment with commit SHA/message/author and RPUSH `TypeDeploy` — the same rolling pipeline as the Deploy button (preview/production, volumes, domains, TLS). Manual deploy is unchanged. GitHub Actions is not used. Chat named this increment; it was not on the remaining-7 list, so the repository records it as 7.7.
+Operators connect a GitHub account (OAuth App via `FORGE_GITHUB_CLIENT_ID` / `FORGE_GITHUB_CLIENT_SECRET`), pick owner/repo + branch on the application GitHub card (`PUT /applications/{id}/github`), and Forge creates a `push` webhook only when `FORGE_WEBHOOK_BASE` is not loopback or a private address. The card shows the API `webhook` and `warning` fields. A linked account or a Git URL is not push-to-deploy. Tokens and webhook secrets are sealed at rest and never returned to the dashboard. `POST /webhooks/github/{application_id}` is public but HMAC-verified (`X-Hub-Signature-256`). A delivery stays `pending` until Redis accepts the job (migration 0024). A failed enqueue is `failed`, and GitHub's retry of that same id re-queues the existing deployment instead of starting a second one. A finished id is `queued` and is not deployed again. A matching branch push creates a queued deployment with commit SHA/message/author and RPUSH `TypeDeploy` — the same rolling pipeline as the Deploy button (preview/production, volumes, domains, TLS). Manual deploy is unchanged. GitHub Actions is not used. A real push from GitHub.com to this laptop is unverified until the operator sets a public `FORGE_WEBHOOK_BASE`. Chat named this increment; it was not on the remaining-7 list, so the repository records it as 7.7.
 
-The login page also offers **Continue with GitHub** (`GET /auth/github`, same OAuth app and callback). A `github_oauth_states` row with a NULL `user_id` is a sign-in. The callback requires the `forge_github_state` cookie from the browser that started it. Identity match is `github_user_id`. A new GitHub user gets a Forge user with a random unused password hash. A password account is not taken over because the GitHub login string matches its username. Connecting a repo stays on the application GitHub tab.
+The login page also offers **Continue with GitHub** (`GET /auth/github`, same OAuth app and callback). A `github_oauth_states` row with a NULL `user_id` is a sign-in. The callback requires the `forge_github_state` cookie from the browser that started it. Identity match is `github_user_id`. A new GitHub user gets a Forge user with a random unused password hash. A password account is not taken over because the GitHub login string matches its username. Connecting a repo stays on the application overview GitHub card.
 
 ### Increment 7.8 — deployment lease and recovery sweep (COMPLETE)
 
@@ -400,7 +400,7 @@ Authorized in chat as the measurement increment after 7.10. A fetched tree that 
 
 ### Increment 7.12 — nested service discovery (COMPLETE)
 
-`detect.Discover` still classifies the root and each child. A child with no service marker is opened once more, so `apps/web` and `services/api` become services. A directory that already matched is not opened, so `frontend/src` is not a second application. `group/team/web` is still not discovered. A Go `cmd/<name>` inside a nested module keeps the module path in the service name (`services/api/worker`) and the module directory as `root_directory`. The GitHub plan snapshot already saved manifests two levels down; it now also opens `cmd/` at that depth so the plan sees `main.go`. Saga compensation, the workspace quota, and fetch behavior are unchanged. Not a build cache. Not an editable plan.
+`detect.Discover` still classifies the root and each child. A child with no service marker is opened once more, so `apps/web` and `services/api` become services. A directory that already matched is not opened, so `frontend/src` is not a second application. Increment 7.15 later raised the walk to eight path segments, so `group/team/web` is discovered. This paragraph's original two-level stop is historical. A Go `cmd/<name>` inside a nested module keeps the module path in the service name (`services/api/worker`) and the module directory as `root_directory`. The GitHub plan snapshot already saved manifests two levels down; it now also opens `cmd/` at that depth so the plan sees `main.go`. Saga compensation, the workspace quota, and fetch behavior are unchanged. Not a build cache. Not an editable plan.
 
 ### Increment 7.13 — post-fetch Git metadata cleanup (COMPLETE)
 
@@ -416,7 +416,21 @@ Generated recipes also exclude caches that recipe recreates: Rust `target`, Java
 
 Authorized in chat as the build-cache increment, scoped to the poisoning boundary. After a successful `docker build`, the worker inspects the image ID and inserts one `build_cache` row (migration 0023) keyed by a sha256 of the confined build directory plus the sorted public build env (`NEXT_PUBLIC_`, `VITE_`, `REACT_APP_`). The git commit is not the key. Runtime secrets are not hashed and are not stored. A later deploy with the same key retags that image onto the new deployment and skips `docker build`. Reuse requires `docker image inspect` to still return the recorded ID. A missing or replaced image drops the index row and builds. A failed build is not indexed. `ON CONFLICT DO NOTHING` keeps the first validated image when two builds race. Prune deletes index rows beyond the newest eight only when no deployment of that application still names the image. Prune does not delete Docker images, volumes, or deployment rows. `FORGE_BUILD_CACHE=off` skips the index. A hit is not a health result: the container still starts and the health check still gates cutover. `deploy measurements` adds `build_cache=hit|miss|bypass`. The deployment log shows the same word, and the dashboard repeats it.
 
-Not implemented in this increment: a shared npm/pip/Go module cache, a Git object mirror, BuildKit cache mounts, resuming a failed deploy from a mid-build checkpoint, and recursive discovery past the 7.12 depth. A shared package cache is the poisoning case this increment refuses. Docker layer reuse on a miss remains the builder's own cache because `--no-cache` is still not passed.
+Not implemented in this increment: a shared npm/pip/Go module cache, a Git object mirror, BuildKit cache mounts, and resuming a failed deploy from a mid-build checkpoint. A shared package cache is the poisoning case this increment refuses. Docker layer reuse on a miss remains the builder's own cache because `--no-cache` is still not passed. Deeper discovery is increment 7.15.
+
+### Increment 7.15 — deeper discovery and deployment preflight (COMPLETE)
+
+Authorized in chat after 7.14. `detect.Discover` walks directories that are not themselves services, up to eight path segments. `group/team/web` is a service. A ninth segment is not planned. A matched directory is still not opened, so `frontend/src` and `node_modules` stay out. More than 16 service roots add one non-deployable `preflight_service_cap` row and stop. `forge.yaml` still replaces the walk when it is present. It is not required when the detectors recognize the project.
+
+A service the packs cannot start is `missing_start` or `unsupported_strategy` and is not deployed. A production Compose project without a root Dockerfile stays `unsupported_compose`. `EXPOSE` outside 1–65535 is `invalid_port` and fails in detecting, before `docker build`. A missing `EXPOSE` still uses the existing default. Increment 7.16 later reads example-file key names and still discards values. The GitHub plan snapshot uses the same depth and still does not download source inside a service directory, apart from `cmd/`. Health checks, rollback, resource limits, and the 7.14 image index are unchanged.
+
+Verified by `go test ./internal/detect/ ./internal/githubapi/ ./internal/deploy/ -count=1`. No live deploy was run.
+
+### Increment 7.16 — deployment doctor and environment intelligence (COMPLETE)
+
+Authorized in chat as the first of the remaining Phase 7 increments. The doctor reads `.env.example`, `.env.sample`, or `.env.template` for key names and drops the value side before any finding is built. A symlink is not opened. A file over 64 KiB is skipped. The repository plan, which has not loaded stored environment, reports `env_declared` with confidence `hypothesis`. A deploy that has loaded stored keys reports `env_missing` only for names that are absent, and does not mention names that are already set. `PORT` and `FORGE_*` are `env_reserved`. None of these findings block the deploy, overwrite a stored value, or edit application source. The only automatic source write remains the existing Go package repair. Findings are attached to each planned service and shown on the project page. The worker appends the same codes and key names to the build log, and to a detect failure, after the Docker output so the log tail keeps them. The GitHub plan snapshot downloads the example file into its temporary directory so the plan can name keys. That directory is deleted with the snapshot. An oversized example file does not fail the rest of the plan.
+
+Verified by `go test ./internal/detect/ ./internal/githubapi/ ./internal/deploy/ -count=1` and `go vet` on those packages. No live deploy was run.
 
 ### Remaining capabilities (do not implement the list at once)
 
@@ -564,7 +578,7 @@ Before moving forward:
 
 **Phase 6 — COMPLETE** (authorized `START PHASE 6`)
 
-**Phase 7 — IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.14 are done. The status paragraph in section 10 is authoritative.
+**Phase 7 — IN PROGRESS** (authorized `START PHASE 7`). Increments 7.1–7.16 are done. The status paragraph in section 10 is authoritative.
 
 Increment 0.1 (done): loopback Postgres + Redis, Go API `GET /health`.
 
@@ -600,7 +614,7 @@ Phase 7.5 (done): preview and production mount isolated Docker named volumes; ro
 
 Phase 7.6 (done): `application_domains`; DNS TXT ownership; Caddy ACME site blocks for verified hostnames; `.localhost` unchanged. Not wildcards, not DNS-01, not GitHub.
 
-Phase 7.7 (done): GitHub OAuth connect/disconnect; repo+branch binding; HMAC webhooks; delivery-id dedupe; auto-deploy reuses `TypeDeploy` with commit metadata. Tokens never in JSON. Not GitHub Actions, not a second pipeline. Sign-in with GitHub uses the same OAuth app (`GET /auth/github`); it matches `github_user_id` and does not take over a password account by name.
+Phase 7.7 (done): GitHub OAuth connect/disconnect; application GitHub card saves repo, branch, and environment; HMAC webhooks; delivery state `pending`/`failed`/`queued` so a failed enqueue can be retried once; auto-deploy reuses `TypeDeploy` with commit metadata. Tokens never in JSON. A webhook is registered only for a public `FORGE_WEBHOOK_BASE`. Not GitHub Actions, not a second pipeline, not a tunnel. Sign-in with GitHub uses the same OAuth app (`GET /auth/github`); it matches `github_user_id` and does not take over a password account by name. End-to-end delivery from GitHub.com is unverified without that public URL.
 
 Phase 7.8 (done): `lease_until` and `recovery_count`; worker renews the lease; API and worker sweep expired leases and queued rows whose message was never taken. Early stages re-queue at most twice. Later stages fail closed without replacing the previous live row. Not AWS, not a durable Redis, not HA.
 

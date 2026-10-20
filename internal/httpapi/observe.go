@@ -69,14 +69,24 @@ func (w *statusWriter) Flush() {
 
 type metricsResponse struct {
 	observe.Snapshot
-	DeploymentsTotal     int   `json:"deployments_total"`
-	DeploymentsLive      int   `json:"deployments_live"`
-	DeploymentsFailed    int   `json:"deployments_failed"`
-	LastDeployDurationMS int64 `json:"last_deploy_duration_ms"`
-	ContainersRunning    int   `json:"containers_running"`
-	ContainersChecked    int   `json:"containers_checked"`
-	NodesReady           int   `json:"nodes_ready"`
-	NodesDead            int   `json:"nodes_dead"`
+	// CollectedAt is when this response was assembled. It is not the
+	// window of the process counters; those start at started_at.
+	CollectedAt           time.Time        `json:"collected_at"`
+	CounterScope          string           `json:"counter_scope"`
+	DeploymentsTotal      int              `json:"deployments_total"`
+	DeploymentsLive       int              `json:"deployments_live"`
+	DeploymentsFailed     int              `json:"deployments_failed"`
+	DeploymentsInProgress int              `json:"deployments_in_progress"`
+	ApplicationsObserved  int              `json:"applications_observed"`
+	ApplicationsUnique    int              `json:"applications_unique"`
+	LastDeployDurationMS  int64            `json:"last_deploy_duration_ms"`
+	ContainersRunning     int              `json:"containers_running"`
+	ContainersChecked     int              `json:"containers_checked"`
+	NodesReady            int              `json:"nodes_ready"`
+	NodesDead             int              `json:"nodes_dead"`
+	QueueDepth            string           `json:"queue_depth"`
+	QueueDepthReason      string           `json:"queue_depth_reason"`
+	Services              []metricsService `json:"services"`
 }
 
 func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +100,14 @@ func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	out := metricsResponse{Snapshot: s.Metrics.Snapshot()}
+	out := metricsResponse{
+		Snapshot:         s.Metrics.Snapshot(),
+		CollectedAt:      time.Now().UTC(),
+		CounterScope:     "api_process",
+		QueueDepth:       unavailableValue,
+		QueueDepthReason: queueDepthReason,
+		Services:         []metricsService{},
+	}
 	if s.Projects == nil || s.Deployments == nil {
 		writeJSON(w, http.StatusOK, out)
 		return
@@ -102,23 +119,49 @@ func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var last store.Deployment
+	var apps []store.Application
+	var deps []store.Deployment
+	// probes records only the containers this request actually inspected.
+	// A live row past the cap is absent, which buildServiceMetrics treats
+	// as not_probed. An inspect error is probe_error, not not_running:
+	// a Docker outage must not look like every container stopped.
+	probes := map[string]string{}
 	for _, p := range projects {
-		deps, err := s.Deployments.ListDeploymentsByProject(ctx, p.ID)
+		if s.Apps != nil {
+			listed, err := s.Apps.ListApplicationsByProject(ctx, p.ID)
+			if err != nil {
+				s.logger().Error("metrics list applications failed", "err", err)
+				writeError(w, http.StatusInternalServerError, "failed to read metrics")
+				return
+			}
+			apps = append(apps, listed...)
+		}
+		listed, err := s.Deployments.ListDeploymentsByProject(ctx, p.ID)
 		if err != nil {
 			s.logger().Error("metrics list deployments failed", "err", err)
 			writeError(w, http.StatusInternalServerError, "failed to read metrics")
 			return
 		}
-		for _, d := range deps {
+		deps = append(deps, listed...)
+		for _, d := range listed {
 			out.DeploymentsTotal++
+			if d.Status.InProgress() {
+				out.DeploymentsInProgress++
+			}
 			switch d.Status {
 			case store.StatusLive:
 				out.DeploymentsLive++
 				if s.Runtime != nil && out.ContainersChecked < 20 {
 					out.ContainersChecked++
-					ok, runErr := s.Runtime.Running(ctx, runtime.ResolveContainerName(d.ID, d.ContainerName))
-					if runErr == nil && ok {
+					running, runErr := s.Runtime.Running(ctx, runtime.ResolveContainerName(d.ID, d.ContainerName))
+					switch {
+					case runErr != nil:
+						probes[d.ID] = string(observe.ProbeError)
+					case running:
+						probes[d.ID] = string(observe.ProbeRunning)
 						out.ContainersRunning++
+					default:
+						probes[d.ID] = string(observe.ProbeNotRunning)
 					}
 				}
 			case store.StatusFailed:
@@ -132,6 +175,7 @@ func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
 	if last.ID != "" {
 		out.LastDeployDurationMS = last.DurationMS()
 	}
+	deadNodes := map[string]bool{}
 	if s.Nodes != nil {
 		nodes, err := s.Nodes.ListNodes(ctx)
 		if err != nil {
@@ -145,9 +189,12 @@ func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
 				out.NodesReady++
 			case store.NodeDead:
 				out.NodesDead++
+				deadNodes[n.ID] = true
 			}
 		}
 	}
+	out.Services = buildServiceMetrics(apps, deps, probes, deadNodes)
+	out.ApplicationsObserved, out.ApplicationsUnique = countApplications(out.Services)
 	writeJSON(w, http.StatusOK, out)
 }
 

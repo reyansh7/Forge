@@ -28,6 +28,7 @@ type ApplicationStore interface {
 	ListEnvVars(ctx context.Context, applicationID string) ([]store.EnvVar, error)
 	PutEnvVar(ctx context.Context, applicationID, key, value string) error
 	ReplaceEnvVars(ctx context.Context, applicationID string, vars []store.EnvVar) error
+	MergeEnvVars(ctx context.Context, applicationID string, vars []store.EnvVar) error
 	DeleteEnvVar(ctx context.Context, applicationID, key string) error
 }
 

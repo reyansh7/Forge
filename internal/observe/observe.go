@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,13 +28,35 @@ type Metrics struct {
 	httpRequests  atomic.Int64
 	httpErrors    atomic.Int64
 	deploysQueued atomic.Int64
+	// startOnce records the first time this process touched the
+	// counters. That is the window for the three totals below. It is
+	// not a historical epoch and it resets when the API restarts.
+	startOnce sync.Once
+	started   time.Time
 }
 
 // Snapshot is a JSON-safe copy of process counters.
+//
+// StartedAt is the first observation by this process. The three totals
+// count only since then. They are not lifetime platform totals.
 type Snapshot struct {
-	HTTPRequests  int64 `json:"http_requests_total"`
-	HTTPErrors    int64 `json:"http_errors_total"`
-	DeploysQueued int64 `json:"deploys_queued_total"`
+	HTTPRequests  int64     `json:"http_requests_total"`
+	HTTPErrors    int64     `json:"http_errors_total"`
+	DeploysQueued int64     `json:"deploys_queued_total"`
+	StartedAt     time.Time `json:"started_at,omitempty"`
+}
+
+// Started marks the window for process counters. The first call wins.
+// Later calls return that same instant so a refresh does not slide the
+// window forward and make the totals look like a rate.
+func (m *Metrics) Started() time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	m.startOnce.Do(func() {
+		m.started = time.Now().UTC()
+	})
+	return m.started
 }
 
 func (m *Metrics) IncHTTP(status int) {
@@ -61,6 +84,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		HTTPRequests:  m.httpRequests.Load(),
 		HTTPErrors:    m.httpErrors.Load(),
 		DeploysQueued: m.deploysQueued.Load(),
+		StartedAt:     m.Started(),
 	}
 }
 
